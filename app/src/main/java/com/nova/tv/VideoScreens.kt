@@ -117,7 +117,7 @@ fun VideoSearchScreen(
     onSelect: (RemoteVideo, FocusRequester) -> Unit,
     onOpenSources: () -> Unit
 ) {
-    val sources = remember { repository.sources() }
+    val source = remember(repository) { repository.defaultSource() }
     var query by remember { mutableStateOf("") }
     var result by remember { mutableStateOf<SearchResult?>(null) }
     var loading by remember { mutableStateOf(false) }
@@ -128,15 +128,17 @@ fun VideoSearchScreen(
     fun search() {
         val value = query.trim()
         if (value.isEmpty()) { error = "输入片名或关键词开始搜索"; return }
-        if (sources.none { it.enabled }) { error = "请先添加并启用一个视频源"; return }
+        if (source == null) { error = "请先添加并启用一个视频源"; return }
         loading = true
         error = null
         result = null
         keyboard?.hide()
         scope.launch {
             try {
-                result = repository.search(value)
+                result = SearchResult(repository.searchSource(source, value), emptyList())
                 if (result?.videos.isNullOrEmpty() && result?.errors.isNullOrEmpty()) error = "没有找到相关影片"
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (failure: Exception) {
                 error = failure.message ?: "搜索失败，请检查网络和视频源"
             } finally { loading = false }
@@ -148,7 +150,7 @@ fun VideoSearchScreen(
     Column(Modifier.fillMaxSize().padding(start = 108.dp, end = 38.dp, top = 28.dp, bottom = 24.dp)) {
         Text("搜索影片", color = Color.White, fontSize = 31.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(7.dp))
-        Text("在已启用的 MacCMS 视频源中查找电影、剧集和纪录片", color = ScreenMuted, fontSize = 13.sp)
+        Text("在当前站点中查找电影、剧集和纪录片", color = ScreenMuted, fontSize = 13.sp)
         Spacer(Modifier.height(22.dp))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             InputBox(
@@ -160,10 +162,10 @@ fun VideoSearchScreen(
                 onSubmit = { search() }
             )
             TvActionButton("搜索", primary = true, onClick = { search() })
-            if (sources.isEmpty()) TvActionButton("配置视频源", onClick = onOpenSources)
+            if (source == null) TvActionButton("配置视频源", onClick = onOpenSources)
         }
         Spacer(Modifier.height(16.dp))
-        val sourceLabel = if (sources.isEmpty()) "尚未配置视频源" else "搜索范围：${sources.count { it.enabled }} 个已启用站点"
+        val sourceLabel = if (source == null) "尚未启用视频源" else "搜索范围：${source.name}（当前站点）"
         Text(sourceLabel, color = AccentGold, fontSize = 12.sp)
         Spacer(Modifier.height(16.dp))
         when {
@@ -182,7 +184,7 @@ fun VideoSearchScreen(
                 Text("找到 ${items.size} 个结果", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 if (result!!.errors.isNotEmpty()) {
                     Spacer(Modifier.height(5.dp))
-                    Text("部分站点暂不可用：${result!!.errors.joinToString("；")}", color = Color(0xFFD5A069), fontSize = 11.sp, maxLines = 2)
+                    Text("当前站点暂不可用：${result!!.errors.joinToString("；")}", color = Color(0xFFD5A069), fontSize = 11.sp, maxLines = 2)
                 }
                 Spacer(Modifier.height(12.dp))
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
@@ -210,8 +212,8 @@ fun VideoSearchScreen(
             }
             else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(if (sources.isEmpty()) "先配置资源站，再开始查找内容" else "输入片名，搜索所有启用的视频源", color = ScreenMuted, fontSize = 16.sp)
-                    if (sources.isEmpty()) {
+                    Text(if (source == null) "先配置资源站，再开始查找内容" else "输入片名，搜索当前站点", color = ScreenMuted, fontSize = 16.sp)
+                    if (source == null) {
                         Spacer(Modifier.height(16.dp))
                         TvActionButton("打开视频源配置", primary = true, onClick = onOpenSources)
                     }
