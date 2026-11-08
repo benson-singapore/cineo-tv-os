@@ -85,6 +85,26 @@ private val ScreenInk = Color(0xFF090D13)
 private val ScreenMuted = Color(0xFFB6C0CD)
 private val AccentGold = Color(0xFFE9B44C)
 
+internal val LocalTmdbMetadataRepository = staticCompositionLocalOf<TmdbMetadataRepository?> { null }
+
+@Composable
+private fun cachedTmdbMetadata(video: RemoteVideo): TmdbTvMetadata? {
+    val repository = LocalTmdbMetadataRepository.current ?: return null
+    val revision by repository.cacheRevision.collectAsState()
+    val metadata by produceState<TmdbTvMetadata?>(null, repository, video, revision) {
+        value = repository.cachedDetails(video)
+    }
+    return metadata
+}
+
+private fun TmdbTvMetadata?.displayVideo(video: RemoteVideo): RemoteVideo = video.copy(
+    year = this?.year?.takeIf(String::isNotBlank) ?: video.year,
+    description = this?.overview?.takeIf(String::isNotBlank) ?: video.description,
+    posterUrl = this?.posterUrl?.takeIf(String::isNotBlank) ?: video.posterUrl,
+    rating = this?.rating?.takeIf { it.isFinite() && it > 0.0 }
+        ?.let { String.format(java.util.Locale.ROOT, "%.1f", it) } ?: video.rating
+)
+
 @OptIn(ExperimentalFoundationApi::class)
 private val MinimalFocusBringIntoViewSpec = object : BringIntoViewSpec {}
 
@@ -733,9 +753,14 @@ private fun RemoteHomeHero(
     onPrimary: () -> Unit,
     onSecondary: (RemoteVideo, FocusRequester) -> Unit
 ) {
-    var artwork by remember(video.posterUrl) { mutableStateOf<LoadedArtwork?>(null) }
+    val metadata = cachedTmdbMetadata(video)
+    val displayVideo = metadata.displayVideo(video)
+    val artworkUrl = metadata?.backdropUrl?.takeIf(String::isNotBlank) ?: displayVideo.posterUrl
+    var artwork by remember(artworkUrl) { mutableStateOf<LoadedArtwork?>(null) }
     val secondaryFocusRequester = remember(video.id) { FocusRequester() }
-    LaunchedEffect(video.posterUrl) { artwork = loadArtwork(video.posterUrl) }
+    LaunchedEffect(artworkUrl) {
+        artwork = loadArtwork(artworkUrl) ?: loadArtwork(video.posterUrl)
+    }
     Box(Modifier.fillMaxWidth().height(420.dp).clipToBounds()) {
         val loadedArtwork = artwork
         val portraitArtwork = loadedArtwork?.let { it.image.height > it.image.width } == true
@@ -790,9 +815,9 @@ private fun RemoteHomeHero(
             }
             Text(video.title, color = Color.White, fontSize = 33.sp, fontWeight = FontWeight.Bold, maxLines = 2)
             Spacer(Modifier.height(9.dp))
-            Text(listOf(video.year, video.category, video.sourceName).filter(String::isNotBlank).joinToString("　·　"), color = Color.White.copy(alpha = .86f), fontSize = 12.sp)
+            Text(listOf(displayVideo.year, video.category, displayVideo.rating.takeIf { (it.toDoubleOrNull() ?: 0.0) > 0.0 }?.let { "★ $it" }.orEmpty(), metadata?.genres?.joinToString(" / ").orEmpty(), video.sourceName).filter(String::isNotBlank).joinToString("　·　"), color = Color.White.copy(alpha = .86f), fontSize = 12.sp)
             Spacer(Modifier.height(9.dp))
-            Text(video.description.ifBlank { "从喜欢的故事开始观看。" }, color = ScreenMuted, fontSize = 12.sp, lineHeight = 19.sp, maxLines = 2)
+            Text(displayVideo.description.ifBlank { "从喜欢的故事开始观看。" }, color = ScreenMuted, fontSize = 12.sp, lineHeight = 19.sp, maxLines = 2)
             Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 TvActionButton(
@@ -2450,6 +2475,7 @@ private fun VideoResultCard(
     posterAspectRatio: Float = 0.85f,
     onFocused: () -> Unit = {}
 ) {
+    val displayVideo = cachedTmdbMetadata(video).displayVideo(video)
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(10.dp)
     Column(modifier.onFocusChanged {
@@ -2463,9 +2489,9 @@ private fun VideoResultCard(
         .focusable()
         .padding(4.dp)) {
         Box(Modifier.fillMaxWidth().aspectRatio(posterAspectRatio).clip(RoundedCornerShape(7.dp))) {
-            RemoteArtwork(video.posterUrl, video.title, Modifier.fillMaxSize())
+            RemoteArtwork(displayVideo.posterUrl, video.title, Modifier.fillMaxSize(), fallbackUrl = video.posterUrl)
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD090D13)))))
-            if (video.rating.isNotBlank()) Text("★ ${video.rating}", Modifier.align(Alignment.TopEnd).padding(8.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xB9090D13)).padding(horizontal = 7.dp, vertical = 4.dp), color = AccentGold, fontSize = 10.sp)
+            if ((displayVideo.rating.toDoubleOrNull() ?: 0.0) > 0.0) Text("★ ${displayVideo.rating}", Modifier.align(Alignment.TopEnd).padding(8.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xB9090D13)).padding(horizontal = 7.dp, vertical = 4.dp), color = AccentGold, fontSize = 10.sp)
             Text(video.sourceName, Modifier.align(Alignment.BottomStart).padding(9.dp), color = Color.White.copy(alpha = .85f), fontSize = 9.sp, maxLines = 1)
             if (progress != null && progress > 0f) {
                 Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress.coerceIn(0f, 1f)).height(3.dp).background(AccentGold))
@@ -2474,14 +2500,14 @@ private fun VideoResultCard(
         Spacer(Modifier.height(7.dp))
         Text(video.title, Modifier.padding(horizontal = 5.dp), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
         Spacer(Modifier.height(3.dp))
-        Text(listOf(video.year, video.category).filter(String::isNotBlank).joinToString(" · "), Modifier.padding(horizontal = 5.dp, vertical = 2.dp), color = ScreenMuted, fontSize = 10.sp, maxLines = 1)
+        Text(listOf(displayVideo.year, video.category).filter(String::isNotBlank).joinToString(" · "), Modifier.padding(horizontal = 5.dp, vertical = 2.dp), color = ScreenMuted, fontSize = 10.sp, maxLines = 1)
     }
 }
 
 @Composable
-private fun RemoteArtwork(url: String, title: String, modifier: Modifier = Modifier) {
+private fun RemoteArtwork(url: String, title: String, modifier: Modifier = Modifier, fallbackUrl: String = "") {
     var artwork by remember(url) { mutableStateOf<LoadedArtwork?>(null) }
-    LaunchedEffect(url) { artwork = loadArtwork(url) }
+    LaunchedEffect(url, fallbackUrl) { artwork = loadArtwork(url) ?: loadArtwork(fallbackUrl) }
     Box(modifier.background(Brush.linearGradient(listOf(Color(0xFF334354), Color(0xFF151B27)))), contentAlignment = Alignment.Center) {
         if (artwork != null) Image(artwork!!.image, contentDescription = title, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         else Text(title.take(1), color = Color.White.copy(alpha = .72f), fontSize = 44.sp, fontWeight = FontWeight.Bold)

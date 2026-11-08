@@ -4,6 +4,9 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -127,11 +130,38 @@ class TmdbSettingsStore(context: Context) {
     }
 }
 
-/** Fetches TV metadata only after a user opens a likely series detail page. */
+/** Fetches details on demand and shares cached metadata with browsing screens. */
 class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
     private val database = settings.database
 
-    fun clearCache() = database.clearTmdbMetadataCache()
+    private val revision = MutableStateFlow(0L)
+    val cacheRevision = revision.asStateFlow()
+
+    fun clearCache() {
+        database.clearTmdbMetadataCache()
+        revision.update { it + 1 }
+    }
+
+    /** Cache-only lookup: browsing never triggers a TMDB search or season download. */
+    suspend fun cachedDetails(video: RemoteVideo): TmdbTvMetadata? = withContext(Dispatchers.IO) {
+        readCachedDetails(video, System.currentTimeMillis())
+    }
+
+    private fun cacheKey(video: RemoteVideo): String =
+        normalize(video.title).ifBlank { video.title.trim().lowercase() }
+
+    private fun readCachedDetails(video: RemoteVideo, now: Long): TmdbTvMetadata? {
+        val key = cacheKey(video)
+        val (json, lastAccessedAt) = database.readTmdbMetadataCache(key) ?: return null
+        if (now - lastAccessedAt >= cacheRetentionMillis()) {
+            database.deleteTmdbMetadataCache(key)
+            return null
+        }
+        val metadata = runCatching { JSONObject(json).toTmdbTvMetadata() }.getOrNull()
+        if (metadata == null) database.deleteTmdbMetadataCache(key)
+        else database.touchTmdbMetadataCache(key, now)
+        return metadata
+    }
 
     fun pruneExpiredCache() {
         database.deleteExpiredTmdbMetadataCache(System.currentTimeMillis() - cacheRetentionMillis())
@@ -146,18 +176,9 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
         return withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             val retentionMillis = cacheRetentionMillis()
-            val cacheKey = normalize(video.title).ifBlank { video.title.trim().lowercase() }
+            val cacheKey = cacheKey(video)
             database.deleteExpiredTmdbMetadataCache(now - retentionMillis)
-            database.readTmdbMetadataCache(cacheKey)?.let { (json, lastAccessedAt) ->
-                if (now - lastAccessedAt < retentionMillis) {
-                    val cached = runCatching { JSONObject(json).toTmdbTvMetadata() }.getOrNull()
-                    if (cached != null) {
-                        database.touchTmdbMetadataCache(cacheKey, now)
-                        return@withContext cached
-                    }
-                }
-                database.deleteTmdbMetadataCache(cacheKey)
-            }
+            readCachedDetails(video, now)?.let { return@withContext it }
             val token = settings.readToken() ?: return@withContext null
             val year = video.year.take(4).toIntOrNull()
             val searchTitle = searchTitle(video.title)
@@ -233,6 +254,7 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
                 seasons = seasons
             )
             database.writeTmdbMetadataCache(cacheKey, result.toJson().toString(), now)
+            revision.update { it + 1 }
             result
         }
     }

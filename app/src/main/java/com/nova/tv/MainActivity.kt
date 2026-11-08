@@ -270,6 +270,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
             else -> showExitConfirmation = true
         }
     }
+    CompositionLocalProvider(LocalTmdbMetadataRepository provides tmdbRepository) {
     Box(Modifier.fillMaxSize().background(Color(0xFF090D13))) {
         Box(
             Modifier.fillMaxSize()
@@ -653,6 +654,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
             }
         }
     }
+}
 }
 
 @Composable
