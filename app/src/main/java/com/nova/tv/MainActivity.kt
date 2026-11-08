@@ -2,19 +2,29 @@ package com.nova.tv
 
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Theaters
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -36,24 +46,35 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
+import kotlinx.coroutines.launch
 import androidx.tv.material3.Icon
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 
 private val Gold = Color(0xFFE9B44C)
 private val Muted = Color(0xFFF0F2F5)
 private data class Movie(val title: String, val subtitle: String, val image: Int, val tag: String)
-private data class NavDestination(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
+private data class NavDestination(
+    val label: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val section: String = label
+)
 private val destinations = listOf(
-    NavDestination("首页", Icons.Filled.Home),
+    NavDestination("主页", Icons.Filled.Home, "首页"),
     NavDestination("电影", Icons.Filled.Movie),
     NavDestination("剧集", Icons.Filled.LiveTv),
+    NavDestination("动漫", Icons.Filled.Animation),
+    NavDestination("短剧", Icons.Filled.Theaters),
     NavDestination("纪录片", Icons.Filled.Explore),
-    NavDestination("我的收藏", Icons.Filled.Favorite)
+    NavDestination("继续观看", Icons.Filled.History),
+    NavDestination("收藏", Icons.Filled.Favorite, "我的收藏"),
+    NavDestination("搜索", Icons.Filled.Search)
 )
+private val settingsDestination = NavDestination("配置", Icons.Filled.Settings)
 private val movies = listOf(
     Movie("星际远航", "2025 · 科幻 / 冒险", R.drawable.space, "8.9"),
     Movie("长夜之后", "2024 · 悬疑 / 剧情", R.drawable.night, "8.6"),
@@ -64,9 +85,11 @@ private val movies = listOf(
 )
 
 class MainActivity : ComponentActivity() {
+    private val videoRepository by lazy { MacCmsRepository(applicationContext) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { NovaHome(onExit = { finish() }) }
+        setContent { NovaHome(videoRepository, onExit = { finish() }) }
     }
 }
 
@@ -86,12 +109,6 @@ private fun FocusTile(
         onFocusChanged(it.isFocused)
     }.then(focusOutline)
         .clip(shape).clickable(onClick = onClick).padding(if (focused && focusColor != Color.Transparent) 2.dp else 3.dp)) { content() }
-}
-
-private fun Movie.tint() = when (image) {
-    R.drawable.night -> Color(0xFF685086)
-    R.drawable.mountain -> Color(0xFF3B7180)
-    else -> Color(0xFF537C8D)
 }
 
 @Composable
@@ -145,36 +162,198 @@ private fun ExitChoiceButton(
 
 @Composable
 @OptIn(ExperimentalTvMaterial3Api::class)
-private fun NovaHome(onExit: () -> Unit) {
+private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
+    val context = LocalContext.current
+    val menuPreferences = remember(context) { NavigationMenuPreferences(context.applicationContext) }
+    val tmdbSettings = remember(context) { TmdbSettingsStore(context.applicationContext) }
+    val tmdbRepository = remember(tmdbSettings) { TmdbMetadataRepository(tmdbSettings) }
+    var menuSettings by remember { mutableStateOf(menuPreferences.load()) }
+    val visibleDestinations = remember(menuSettings) {
+        menuSettings.order
+            .filter { it in menuSettings.visibleItems }
+            .mapNotNull { label -> destinations.firstOrNull { it.label == label } }
+    }
     var section by remember { mutableStateOf("首页") }
+    val sectionNavigationDestination = remember(section, visibleDestinations) {
+        if (section == "配置") null
+        else visibleDestinations.firstOrNull { it.section == section } ?: visibleDestinations.firstOrNull()
+    }
     var selected by remember { mutableStateOf<Movie?>(null) }
     var showExitConfirmation by remember { mutableStateOf(false) }
-    var featured by remember { mutableStateOf(movies.first()) }
+    var contentRevision by remember { mutableIntStateOf(0) }
     var filter by remember { mutableStateOf("全部") }
     var season by remember { mutableIntStateOf(1) }
     var episode by remember { mutableIntStateOf(1) }
     var preview by remember { mutableStateOf(false) }
+    var remoteDetail by remember { mutableStateOf<RemoteVideo?>(null) }
+    var playbackEpisode by remember { mutableStateOf<PlaybackEpisode?>(null) }
+    var playbackVideo by remember { mutableStateOf<RemoteVideo?>(null) }
+    var playbackTitle by remember { mutableStateOf("") }
+    var playbackLine by remember { mutableStateOf("") }
+    var playbackEpisodes by remember { mutableStateOf<List<PlaybackEpisode>>(emptyList()) }
+    var playbackStartPositionMs by remember { mutableLongStateOf(0L) }
+    val playbackScope = rememberCoroutineScope()
+
+    fun loadPlaybackEpisodes(video: RemoteVideo, lineName: String, currentEpisode: PlaybackEpisode) {
+        playbackScope.launch {
+            val fullEpisodeList = try {
+                videoRepository.detail(video).lines.firstOrNull { it.name == lineName }?.episodes.orEmpty()
+            } catch (_: Exception) {
+                emptyList()
+            }
+            if (playbackVideo?.id == video.id && playbackLine == lineName && playbackEpisode?.url == currentEpisode.url && fullEpisodeList.isNotEmpty()) {
+                playbackEpisodes = fullEpisodeList
+            }
+        }
+    }
+    val preserveHomeHeroPositionOnMenuEntry = remember { mutableStateOf(false) }
     val favorites = remember { mutableStateListOf<String>() }
-    val tint by animateColorAsState((selected ?: featured).tint(), label = "Artwork color")
     val firstAction = remember { FocusRequester() }
-    LaunchedEffect(section, selected) { firstAction.requestFocus() }
+    val homeContentEntryFocus = remember { FocusRequester() }
+    var lastHomeContentFocus by remember { mutableStateOf<FocusRequester?>(null) }
+    val sectionNavigationFocus = remember(section, visibleDestinations) { FocusRequester() }
+    val sectionContentEntryFocus = remember(section) { FocusRequester() }
+    val settingsMenuEntryFocus = remember { FocusRequester() }
+    val detailEntryFocus = remember { FocusRequester() }
+    var detailReturnFocusRequester by remember { mutableStateOf<FocusRequester?>(null) }
+    var hadRemoteDetail by remember { mutableStateOf(false) }
+    var hadPlayback by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        sectionNavigationFocus.requestFocus()
+    }
+    LaunchedEffect(remoteDetail?.id) {
+        if (remoteDetail != null) {
+            hadRemoteDetail = true
+            runCatching { detailEntryFocus.requestFocus() }
+        } else if (hadRemoteDetail) {
+            hadRemoteDetail = false
+            val restored = runCatching { detailReturnFocusRequester?.requestFocus() == true }.getOrDefault(false)
+            if (!restored) runCatching { sectionNavigationFocus.requestFocus() }
+            detailReturnFocusRequester = null
+        }
+    }
+    LaunchedEffect(playbackEpisode) {
+        if (playbackEpisode != null) {
+            hadPlayback = true
+        } else if (hadPlayback) {
+            hadPlayback = false
+            val requester = when {
+                remoteDetail != null -> detailEntryFocus
+                section == "首页" -> homeContentEntryFocus
+                else -> sectionNavigationFocus
+            }
+            runCatching { requester.requestFocus() }
+        }
+    }
+    LaunchedEffect(section, selected, remoteDetail, playbackEpisode) {
+        if (section !in setOf("首页", "电影", "剧集", "纪录片", "动漫", "短剧", "继续观看", "我的收藏", "搜索", "配置") && remoteDetail == null && playbackEpisode == null) {
+            firstAction.requestFocus()
+        }
+    }
     BackHandler {
         when {
             showExitConfirmation -> showExitConfirmation = false
             preview -> preview = false
+            playbackEpisode != null -> {
+                playbackEpisode = null
+                playbackVideo = null
+                playbackEpisodes = emptyList()
+                playbackStartPositionMs = 0L
+                contentRevision++
+            }
+            remoteDetail != null -> {
+                remoteDetail = null
+                contentRevision++
+            }
             selected != null -> selected = null
             section != "首页" -> section = "首页"
             else -> showExitConfirmation = true
         }
     }
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(colorStops = arrayOf(
-        0f to tint.copy(alpha = .24f),
-        .26f to Color(0xFF090D13),
-        1f to Color(0xFF090D13)
-    )))) {
-        Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(Color(0xFF090D13))) {
+        Box(
+            Modifier.fillMaxSize()
+                .then(if (remoteDetail != null || playbackEpisode != null) Modifier.focusProperties { canFocus = false } else Modifier)
+        ) {
             val movie = selected
-            if (movie != null) {
+            when {
+                section == "首页" -> VideoHomeScreen(
+                    repository = videoRepository,
+                    entryFocusRequester = homeContentEntryFocus,
+                    onContentFocused = { lastHomeContentFocus = it },
+                    menuFocusRequester = sectionNavigationFocus,
+                    preserveHeroPositionOnMenuEntry = preserveHomeHeroPositionOnMenuEntry,
+                    dataRevision = contentRevision,
+                    onOpenDetail = { video, requester ->
+                        detailReturnFocusRequester = requester
+                        remoteDetail = video
+                    },
+                    onResume = { record ->
+                        playbackVideo = record.video
+                        playbackTitle = record.video.title
+                        playbackLine = record.lineName
+                        playbackEpisodes = listOf(record.episode)
+                        playbackEpisode = record.episode
+                        playbackStartPositionMs = if (record.isComplete) 0L else record.positionMs
+                        loadPlaybackEpisodes(record.video, record.lineName, record.episode)
+                    },
+                    onOpenList = { section = it },
+                    onOpenSection = { section = it },
+                    onOpenConfig = { section = "配置" }
+                )
+                section == "搜索" -> VideoSearchScreen(
+                    repository = videoRepository,
+                    entryFocusRequester = sectionContentEntryFocus,
+                    menuFocusRequester = sectionNavigationFocus,
+                    onSelect = { video, requester ->
+                        detailReturnFocusRequester = requester
+                        remoteDetail = video
+                    },
+                    onOpenSources = { section = "配置" }
+                )
+                section == "配置" -> SettingsScreen(
+                    repository = videoRepository,
+                    tmdbSettings = tmdbSettings,
+                    tmdbRepository = tmdbRepository,
+                    menuSettings = menuSettings,
+                    entryFocusRequester = settingsMenuEntryFocus,
+                    onMenuSettingsChange = { updated ->
+                        menuPreferences.save(updated)
+                        menuSettings = menuPreferences.load()
+                    }
+                )
+                section in setOf("电影", "剧集", "纪录片", "动漫", "短剧") -> VideoCatalogScreen(
+                    repository = videoRepository,
+                    section = section,
+                    entryFocusRequester = sectionContentEntryFocus,
+                    menuFocusRequester = sectionNavigationFocus,
+                    onSelect = { video, requester ->
+                        detailReturnFocusRequester = requester
+                        remoteDetail = video
+                    },
+                    onOpenConfig = { section = "配置" }
+                )
+                section in setOf("继续观看", "我的收藏") -> LocalVideoListScreen(
+                    repository = videoRepository,
+                    section = section,
+                    dataRevision = contentRevision,
+                    entryFocusRequester = sectionContentEntryFocus,
+                    menuFocusRequester = sectionNavigationFocus,
+                    onOpenDetail = { video, requester ->
+                        detailReturnFocusRequester = requester
+                        remoteDetail = video
+                    },
+                    onResume = { record ->
+                        playbackVideo = record.video
+                        playbackTitle = record.video.title
+                        playbackLine = record.lineName
+                        playbackEpisodes = listOf(record.episode)
+                        playbackEpisode = record.episode
+                        playbackStartPositionMs = record.positionMs
+                        loadPlaybackEpisodes(record.video, record.lineName, record.episode)
+                    }
+                )
+                movie != null -> {
                 LazyColumn(contentPadding = PaddingValues(bottom = 35.dp)) {
                     item {
                         Hero(movie, firstAction,
@@ -222,14 +401,8 @@ private fun NovaHome(onExit: () -> Unit) {
                     }
                     item { MovieShelf("你可能也喜欢", movies.filter { it != movie }, false) { selected = it } }
                 }
-            } else if (section == "首页") {
-                LazyColumn(contentPadding = PaddingValues(bottom = 30.dp)) {
-                    item { Hero(featured, firstAction, { selected = featured }, "探索影片", { if (!favorites.remove(featured.title)) favorites.add(featured.title) }, if (featured.title in favorites) "✓  已收藏" else "＋  加入收藏") }
-                    item { MovieShelf("最受欢迎", movies.take(5), false) { featured = it; selected = it } }
-                    item { MovieShelf("接着上次的故事", movies.take(3), true) { selected = it } }
-                    item { MovieShelf("最新上线", movies.reversed(), false) { selected = it } }
                 }
-            } else {
+                else -> {
                 Column(Modifier.fillMaxSize().padding(start = 110.dp, top = 24.dp, end = 30.dp, bottom = 30.dp)) {
                     Text(section, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
@@ -260,50 +433,179 @@ private fun NovaHome(onExit: () -> Unit) {
                         }
                     }
                 }
+                }
             }
         }
+        if (remoteDetail != null) {
+            Box(
+                Modifier.fillMaxSize()
+                    .then(if (playbackEpisode != null) Modifier.focusProperties { canFocus = false } else Modifier)
+            ) {
+                RemoteVideoDetailScreen(
+                    repository = videoRepository,
+                    tmdbSettings = tmdbSettings,
+                    tmdbRepository = tmdbRepository,
+                    entryFocusRequester = detailEntryFocus,
+                    initial = remoteDetail!!,
+                    onPlay = { video, line, episode ->
+                        playbackVideo = video
+                        playbackTitle = video.title
+                        playbackLine = line.name
+                        playbackEpisodes = line.episodes
+                        playbackStartPositionMs = videoRepository.watchRecord(video)
+                            ?.takeIf { !it.isComplete && matchingHistoryEpisode(it, line.episodes)?.url == episode.url }
+                            ?.positionMs ?: 0L
+                        playbackEpisode = episode
+                    }
+                )
+            }
+        }
+        if (playbackEpisode != null && playbackVideo != null) {
+            TvVideoPlayerScreen(
+                repository = videoRepository,
+                video = playbackVideo!!,
+                episode = playbackEpisode!!,
+                videoTitle = playbackTitle,
+                lineName = playbackLine,
+                episodes = playbackEpisodes,
+                startPositionMs = playbackStartPositionMs,
+                onSwitchSource = { sourceVideo, sourceLine, sourceEpisode, position ->
+                    playbackVideo = sourceVideo
+                    playbackTitle = sourceVideo.title
+                    playbackLine = sourceLine.name
+                    playbackEpisodes = sourceLine.episodes
+                    playbackStartPositionMs = position
+                    playbackEpisode = sourceEpisode
+                },
+                onExit = {
+                    playbackEpisode = null
+                    playbackVideo = null
+                    playbackEpisodes = emptyList()
+                    playbackStartPositionMs = 0L
+                    contentRevision++
+                },
+                onSelectEpisode = { selectedEpisode ->
+                    playbackStartPositionMs = 0L
+                    playbackEpisode = selectedEpisode
+                },
+                onProgress = { position, duration ->
+                    videoRepository.saveWatchProgress(
+                        playbackVideo!!, playbackLine, playbackEpisode!!, position, duration
+                    )
+                }
+            )
+        }
         // Navigation floats over the artwork without an opaque panel or divider.
-        Column(
+        if (playbackEpisode == null) Column(
             Modifier.width(68.dp).fillMaxHeight()
                 .padding(horizontal = 9.dp, vertical = 20.dp)
+                .then(when {
+                    remoteDetail != null -> Modifier.focusProperties { right = detailEntryFocus }
+                    section == "首页" -> Modifier.focusProperties { right = homeContentEntryFocus }
+                    section == "配置" -> Modifier.focusProperties { right = settingsMenuEntryFocus }
+                    else -> Modifier
+                })
                 .focusGroup(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Image(painterResource(R.mipmap.ic_launcher), "Cineo logo", Modifier.size(30.dp).clip(CircleShape))
             Spacer(Modifier.height(26.dp))
-            destinations.forEach { destination ->
-                var navFocused by remember(destination.label) { mutableStateOf(false) }
-                val isCurrent = section == destination.label
-                val navShape = RoundedCornerShape(15.dp)
-                FocusTile(
-                    Modifier.size(44.dp).padding(bottom = 5.dp),
-                    onClick = { section = destination.label; selected = null; filter = "全部" },
-                    focusColor = Color.White,
-                    shape = navShape,
-                    onFocusChanged = { navFocused = it }
-                ) {
-                    Box(
-                        Modifier.fillMaxSize()
-                            .background(
-                                when {
-                                    navFocused -> Color.White.copy(alpha = .24f)
-                                    isCurrent -> Color.White.copy(alpha = .13f)
-                                    else -> Color.Transparent
-                                },
-                                navShape
-                            ),
-                        contentAlignment = Alignment.Center
+            LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                contentPadding = PaddingValues(bottom = 5.dp)
+            ) {
+                items(visibleDestinations, key = { it.label }) { destination ->
+                    var navFocused by remember(destination.label) { mutableStateOf(false) }
+                    val isCurrent = section == destination.section
+                    val navShape = RoundedCornerShape(15.dp)
+                    val contentEntryFocus = when {
+                        remoteDetail != null -> detailEntryFocus
+                        section == "首页" -> homeContentEntryFocus
+                        section == "配置" -> settingsMenuEntryFocus
+                        else -> sectionContentEntryFocus
+                    }
+                    val contentRightKey = contentEntryFocus.let { requester -> Modifier.onKeyEvent { event ->
+                        if (event.key == Key.DirectionRight && event.type == KeyEventType.KeyDown) {
+                            if (section == "首页" && remoteDetail == null) {
+                                val restored = runCatching { lastHomeContentFocus?.requestFocus() == true }.getOrDefault(false)
+                                if (restored) return@onKeyEvent true
+                                preserveHomeHeroPositionOnMenuEntry.value = true
+                            }
+                            runCatching { requester.requestFocus() }.getOrDefault(false)
+                        } else false
+                    } }
+                    FocusTile(
+                        Modifier.size(44.dp).padding(bottom = 5.dp)
+                            .then(if (destination == sectionNavigationDestination) Modifier.focusRequester(sectionNavigationFocus) else Modifier)
+                            .then(contentRightKey),
+                        onClick = {
+                            if (remoteDetail != null) contentRevision++
+                            if (remoteDetail != null) detailReturnFocusRequester = null
+                            section = destination.section
+                            selected = null
+                            remoteDetail = null
+                            filter = "全部"
+                        },
+                        focusColor = Color.White,
+                        shape = navShape,
+                        onFocusChanged = { navFocused = it }
                     ) {
-                        Icon(
-                            destination.icon,
-                            contentDescription = destination.label,
-                            modifier = Modifier.size(20.dp),
-                            tint = if (isCurrent || navFocused) Gold else Color(0xFFBBC2CD)
-                        )
+                        Box(
+                            Modifier.fillMaxSize()
+                                .background(
+                                    when {
+                                        navFocused -> Color.White.copy(alpha = .24f)
+                                        isCurrent -> Color.White.copy(alpha = .13f)
+                                        else -> Color.Transparent
+                                    },
+                                    navShape
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                destination.icon,
+                                contentDescription = destination.label,
+                                modifier = Modifier.size(20.dp),
+                                tint = if (isCurrent || navFocused) Gold else Color(0xFFBBC2CD)
+                            )
+                        }
                     }
                 }
             }
-            Spacer(Modifier.weight(1f))
+            var settingsFocused by remember { mutableStateOf(false) }
+            val settingsShape = RoundedCornerShape(15.dp)
+            val settingsRightKey = if (section == "配置") Modifier.onKeyEvent { event ->
+                if (event.key == Key.DirectionRight && event.type == KeyEventType.KeyDown) {
+                    settingsMenuEntryFocus.requestFocus()
+                    true
+                } else false
+            } else Modifier
+            FocusTile(
+                Modifier.size(44.dp).padding(bottom = 5.dp).then(settingsRightKey),
+                onClick = { section = settingsDestination.label; selected = null; remoteDetail = null },
+                focusColor = Color.White,
+                shape = settingsShape,
+                onFocusChanged = { settingsFocused = it }
+            ) {
+                Box(
+                    Modifier.fillMaxSize().background(
+                        when {
+                            settingsFocused -> Color.White.copy(alpha = .24f)
+                            section == settingsDestination.label -> Color.White.copy(alpha = .13f)
+                            else -> Color.Transparent
+                        }, settingsShape
+                    ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        settingsDestination.icon,
+                        contentDescription = settingsDestination.label,
+                        modifier = Modifier.size(20.dp),
+                        tint = if (section == settingsDestination.label || settingsFocused) Gold else Color(0xFFBBC2CD)
+                    )
+                }
+            }
         }
         if (preview) androidx.compose.ui.window.Dialog(onDismissRequest = { preview = false }) {
             Column(Modifier.width(420.dp).clip(RoundedCornerShape(18.dp)).background(Color(0xF0202935)).border(1.dp, Color.White.copy(alpha = .15f), RoundedCornerShape(18.dp)).padding(28.dp)) {
