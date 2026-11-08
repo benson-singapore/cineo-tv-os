@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Notes"
+  short_description: "审计或生成 docs/update/vX.Y.Z.md 版本更新日志"
+  default_prompt: "Use $release-notes to audit or generate release notes from Git tags and commits."

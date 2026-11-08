@@ -1,0 +1,201 @@
+name: Release Android TV APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release, e.g. v1.0.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve tag and verify version contract
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag must look like vX.Y.Z, got: $TAG"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          VERSION_NAME="$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
+          VERSION_CODE="$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)"
+
+          if [ "$VERSION_NAME" != "$VERSION" ]; then
+            echo "::error::app/build.gradle.kts versionName ($VERSION_NAME) does not match tag ($TAG)."
+            exit 1
+          fi
+
+          if [ -z "$VERSION_CODE" ] || [ "$VERSION_CODE" -lt 1 ]; then
+            echo "::error::Invalid versionCode in app/build.gradle.kts: '$VERSION_CODE'"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "Release target: $TAG (versionName=$VERSION_NAME, versionCode=$VERSION_CODE)"
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
+
+      - name: Prepare release signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.CINEO_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.CINEO_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.CINEO_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.CINEO_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required signing secret: CINEO_${name}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Configure CINEO_KEYSTORE_BASE64, CINEO_KEYSTORE_PASSWORD, CINEO_KEY_ALIAS and CINEO_KEY_PASSWORD before releasing."
+            exit 1
+          fi
+
+          KEYSTORE_PATH="$RUNNER_TEMP/cineo-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
+          echo "CINEO_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        shell: bash
+        env:
+          CINEO_KEYSTORE_PASSWORD: ${{ secrets.CINEO_KEYSTORE_PASSWORD }}
+          CINEO_KEY_ALIAS: ${{ secrets.CINEO_KEY_ALIAS }}
+          CINEO_KEY_PASSWORD: ${{ secrets.CINEO_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ./gradlew :app:assembleRelease --no-daemon --console=plain
+
+      - name: Verify APK and prepare release asset
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' ! -name '*unsigned*' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "::error::No signed release APK found. Expected a non-unsigned APK under app/build/outputs/apk/release/."
+            find app/build/outputs/apk/release -maxdepth 1 -type f || true
+            exit 1
+          fi
+
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          if [ ! -x "$APKSIGNER" ]; then
+            APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort | tail -n 1)"
+          fi
+          if [ -z "$APKSIGNER" ] || [ ! -x "$APKSIGNER" ]; then
+            echo "::error::apksigner not found in Android SDK build-tools."
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+
+          ASSET="CineoTV-${{ steps.meta.outputs.tag }}.apk"
+          cp "$APK" "$ASSET"
+          sha256sum "$ASSET" > "$ASSET.sha256"
+
+          echo "path=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "checksum=$ASSET.sha256" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$ASSET" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NOTES_FILE="docs/update/${{ steps.meta.outputs.tag }}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            cp "$NOTES_FILE" "$RUNNER_TEMP/release-notes.md"
+            echo "Using repository release notes: $NOTES_FILE"
+          else
+            echo "::warning::$NOTES_FILE not found; using fallback release notes."
+            {
+              printf '# %s\n\n' "${{ steps.meta.outputs.tag }}"
+              printf 'Cineo TV OS %s 发布。\n' "${{ steps.meta.outputs.tag }}"
+            } > "$RUNNER_TEMP/release-notes.md"
+          fi
+          echo "file=$RUNNER_TEMP/release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          ASSET: ${{ steps.apk.outputs.path }}
+          CHECKSUM: ${{ steps.apk.outputs.checksum }}
+          NOTES: ${{ steps.notes.outputs.file }}
+          SHA256: ${{ steps.apk.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+
+          TITLE="Cineo TV OS $TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES" --draft=false --latest
+            gh release upload "$TAG" "$ASSET" "$CHECKSUM" --clobber
+          else
+            gh release create "$TAG" "$ASSET" "$CHECKSUM" --title "$TITLE" --notes-file "$NOTES" --latest
+          fi
+
+          {
+            echo "## Cineo TV OS $TAG"
+            echo
+            echo "- APK: \`$ASSET\`"
+            echo "- SHA-256: \`$SHA256\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Run: \`$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\`"
+          } >> "$GITHUB_STEP_SUMMARY"

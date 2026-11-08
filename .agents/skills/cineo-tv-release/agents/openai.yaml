@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cineo TV Release"
+  short_description: "发布 Cineo TV OS：生成日志、打 tag、构建 APK 并创建 GitHub Release"
+  default_prompt: "Use $cineo-tv-release to publish a new Cineo TV OS version with release notes, a Git tag, a signed APK built by GitHub Actions, and a GitHub Release."
