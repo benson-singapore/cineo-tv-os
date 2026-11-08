@@ -11,6 +11,7 @@
     <img src="https://img.shields.io/badge/Status-In_Development-F59E0B" alt="Status: In Development" />
   </p>
   <p>
+    <a href="#界面预览">界面预览</a> ·
     <a href="#功能概览">功能概览</a> ·
     <a href="#快速开始">快速开始</a> ·
     <a href="docs/DEVELOPMENT_PLAN.md">开发路线</a> ·
@@ -28,6 +29,35 @@ Cineo TV OS 是 [Cineo Flutter](https://github.com/benson-singapore/cineo-flutte
 TV 端采用 **Kotlin + Jetpack Compose for TV + Media3** 独立实现。这里的「TV OS」是项目名称；当前工程面向 **Android TV**，与 Flutter 手机端协同演进，功能进度以各端实现为准。
 
 > **开发中：** 仓库已包含核心浏览、播放及本地数据代码，仍需持续完成遥控器焦点、设备兼容性与播放稳定性验证。手机扫码绑定、手机输入和云端同步目前处于方案阶段。
+
+## 界面预览
+
+首页以大幅背景呈现最近观看内容，提供继续观看与影片详情入口。
+
+![Cineo TV OS 首页：最近观看、继续观看入口与侧栏导航](docs/images/home-screen.png)
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/series-catalog.png" width="100%" alt="剧集分类：分类筛选与影视海报网格" />
+      <p><strong>剧集分类</strong> · 按分类浏览内容，使用遥控器移动焦点。</p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/images/video-details.png" width="100%" alt="影片详情：背景图、评分、简介与收藏入口" />
+      <p><strong>影片详情</strong> · 查看影片信息，继续播放或加入收藏。</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src="docs/images/episode-selection.png" width="100%" alt="剧集选择：播放来源与带缩略图的剧集列表" />
+      <p><strong>剧集选择</strong> · 切换播放来源，浏览剧集缩略图与标题。</p>
+    </td>
+    <td valign="top">
+      <img src="docs/images/video-source-settings.png" width="100%" alt="视频源设置：站点导入、默认来源与连通性测试" />
+      <p><strong>视频源设置</strong> · 导入与管理站点，设置默认来源并测试连通性。</p>
+    </td>
+  </tr>
+</table>
 
 ## 功能概览
 
