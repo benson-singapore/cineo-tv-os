@@ -7,7 +7,9 @@
 | 文档 | 用途 |
 |---|---|
 | [DEVELOPMENT_PLAN.md](./DEVELOPMENT_PLAN.md) | MVP 范围、阶段顺序、任务清单、依赖关系和阶段验收条件 |
-| [DECISIONS.md](./DECISIONS.md) | 开发前及联调前需要确认的设备、API、授权与账号事项 |
+| [SYNC_DESIGN.md](./SYNC_DESIGN.md) | 多端同步方案：TV 与手机配对、云端增量同步、数据模型、冲突规则与任务拆分（方案草案，未实现） |
+| [DEVICE_CONNECT_DESIGN.md](./DEVICE_CONNECT_DESIGN.md) | 设备互联整合提案：统一绑定、手机输入、云端同步、配额与费用控制、实施顺序及旧草案调整清单（待评审，未实现） |
+| [DECISIONS.md](./DECISIONS.md) | 开发前及联调前需要确认的设备、API、授权、账号与同步事项 |
 
 ## 当前状态
 
