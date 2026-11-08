@@ -3,11 +3,25 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Release signing is injected by CI from GitHub Actions secrets.
+// Local builds without these variables remain unsigned.
+val releaseKeystorePath = providers.environmentVariable("CINEO_KEYSTORE_PATH").orNull
+val releaseKeystorePassword = providers.environmentVariable("CINEO_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("CINEO_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("CINEO_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.nova.tv"
     compileSdk {
         version = release(37)
     }
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "com.nova.tv"
@@ -18,8 +32,22 @@ android {
 
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             optimization {
                 enable = true
                 packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
