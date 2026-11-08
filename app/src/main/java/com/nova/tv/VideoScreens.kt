@@ -70,6 +70,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Text
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -256,7 +257,11 @@ fun VideoCatalogScreen(
         "1:1" -> 1f
         else -> 3f / 4f
     }
-    val gridState = rememberLazyGridState()
+    // A fresh grid starts at the top without waiting for a layout while the
+    // loading branch keeps LazyVerticalGrid out of the composition.
+    val gridState = key(section, source?.id, selectedCategoryId, reloadKey) {
+        rememberLazyGridState()
+    }
     val title = when (section) {
         "首页" -> "精选内容"
         "剧集" -> "剧集"
@@ -277,7 +282,13 @@ fun VideoCatalogScreen(
         hasMore = false
         try {
             if (section != "首页" && !categoriesLoaded) {
-                val available = runCatching { repository.categories(activeSource.id) }.getOrDefault(emptyList())
+                val available = try {
+                    repository.categories(activeSource.id)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    emptyList()
+                }
                 categories = catalogCategories(section, available)
                 categoriesLoaded = true
                 val preferred = preferredCatalogCategory(section, categories)
@@ -288,11 +299,11 @@ fun VideoCatalogScreen(
             }
             val firstPage = repository.browse(activeSource.id, selectedCategoryId, page = 1)
             videos = firstPage.videos
-            // Reset after the new category arrives, before showing its grid.
-            gridState.scrollToItem(0)
             page = firstPage.page
             hasMore = firstPage.hasMore
             if (firstPage.videos.isEmpty()) error = "这个视频源暂时没有返回内容"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (failure: Exception) {
             error = failure.message ?: "无法读取视频站点内容"
         } finally {
@@ -319,6 +330,8 @@ fun VideoCatalogScreen(
                     videos = (videos + next.videos).distinctBy { it.id }
                     page = next.page
                     hasMore = next.hasMore && next.videos.isNotEmpty()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (failure: Exception) {
                     paginationError = failure.message ?: "加载下一页失败，滚动离开后可重试"
                 } finally {
