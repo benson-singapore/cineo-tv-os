@@ -2143,6 +2143,8 @@ fun TvVideoPlayerScreen(
         PlayerSurface(
             repository = repository,
             video = video,
+            videoTitle = videoTitle,
+            lineName = lineName,
             onSwitchSource = onSwitchSource,
             url = episode.url,
             episode = episode,
@@ -2153,11 +2155,6 @@ fun TvVideoPlayerScreen(
             onError = { playbackError = it },
             onProgress = onProgress
         )
-        Column(Modifier.align(Alignment.TopStart).padding(28.dp)) {
-            Text(videoTitle, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(4.dp))
-            Text("$lineName　·　${episode.title}", color = ScreenMuted, fontSize = 12.sp)
-        }
         if (playbackError != null) {
             Column(Modifier.align(Alignment.Center).clip(RoundedCornerShape(14.dp)).background(Color(0xE0202935)).padding(26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("无法播放此视频", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -2175,6 +2172,8 @@ fun TvVideoPlayerScreen(
 private fun PlayerSurface(
     repository: MacCmsRepository,
     video: RemoteVideo,
+    videoTitle: String,
+    lineName: String,
     onSwitchSource: (RemoteVideo, PlaybackLine, PlaybackEpisode, Long) -> Unit,
     url: String,
     episode: PlaybackEpisode,
@@ -2307,6 +2306,13 @@ private fun PlayerSurface(
                 if (playerView === view) playerView = null
             }
         )
+        if (controllerVisible) {
+            Column(Modifier.align(Alignment.TopStart).padding(28.dp)) {
+                Text(videoTitle, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text("$lineName　·　${episode.title}", color = ScreenMuted, fontSize = 12.sp)
+            }
+        }
         if (showEpisodePanel) {
             Column(
                 Modifier.align(Alignment.BottomCenter)
