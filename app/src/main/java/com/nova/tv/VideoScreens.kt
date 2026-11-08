@@ -268,6 +268,8 @@ fun VideoCatalogScreen(
             }
             val firstPage = repository.browse(activeSource.id, selectedCategoryId, page = 1)
             videos = firstPage.videos
+            // Reset after the new category arrives, before showing its grid.
+            gridState.scrollToItem(0)
             page = firstPage.page
             hasMore = firstPage.hasMore
             if (firstPage.videos.isEmpty()) error = "这个视频源暂时没有返回内容"
@@ -276,10 +278,6 @@ fun VideoCatalogScreen(
         } finally {
             loading = false
         }
-    }
-
-    LaunchedEffect(gridState, selectedCategoryId, categoriesLoaded) {
-        if (categoriesLoaded && videos.isNotEmpty()) gridState.scrollToItem(0)
     }
 
     LaunchedEffect(gridState, section, source?.id, selectedCategoryId, columns) {
@@ -316,9 +314,12 @@ fun VideoCatalogScreen(
 
     Column(Modifier.fillMaxSize().padding(start = 108.dp, end = 38.dp, top = 26.dp, bottom = 22.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-            Column {
+            Row(
+                Modifier.weight(1f).padding(end = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(18.dp)
+            ) {
                 Text(title, color = Color.White, fontSize = 31.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(5.dp))
                 Text(
                     when {
                         source == null -> "还没有启用的视频源"
@@ -326,7 +327,9 @@ fun VideoCatalogScreen(
                         else -> "当前站点：${source.name}"
                     },
                     color = ScreenMuted,
-                    fontSize = 12.sp
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                 )
             }
             TvActionButton("预览配置", onClick = { showPreviewConfig = true })
