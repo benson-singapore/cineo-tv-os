@@ -1851,7 +1851,7 @@ fun RemoteVideoDetailScreen(
                         ) {
                             val target = continueTarget
                             if (watchRecord != null && target != null) onPlay(video, target.first, target.second)
-                            else if (firstEpisode != null && selectedLine != null) onPlay(video, selectedLine, firstEpisode)
+                            else if (firstEpisode != null) onPlay(video, selectedLine, firstEpisode)
                         }
                         TvActionButton(
                             if (favorite) "✓ 已收藏" else "＋ 加入收藏",
