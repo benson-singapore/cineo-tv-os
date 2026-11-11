@@ -2587,17 +2587,27 @@ private fun InputBox(
     onSubmit: (() -> Unit)? = null
 ) {
     var focused by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf(false) }
+    val fieldRequester = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(editing) { if (editing) { fieldRequester.requestFocus(); keyboard?.show() } }
+    // 外层容器承接遥控器焦点，按确认键后才进入编辑并弹出输入法。
     Column(modifier.clip(RoundedCornerShape(8.dp)).background(Color(0xFF202B38))
-        .border(if (focused) 2.dp else 1.dp, if (focused) AccentGold else Color.White.copy(alpha = .12f), RoundedCornerShape(8.dp))
+        .border(if (focused || editing) 2.dp else 1.dp, if (focused || editing) AccentGold else Color.White.copy(alpha = .12f), RoundedCornerShape(8.dp))
+        .then(if (inputFocusRequester != null) Modifier.focusRequester(inputFocusRequester) else Modifier)
+        .onFocusChanged { focused = it.isFocused }
+        .focusable(!editing)
+        .clickable { editing = true }
         .padding(horizontal = 14.dp, vertical = 9.dp)) {
-        Text(label, color = if (focused) AccentGold else ScreenMuted, fontSize = 10.sp)
+        Text(label, color = if (focused || editing) AccentGold else ScreenMuted, fontSize = 10.sp)
         Spacer(Modifier.height(4.dp))
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
             modifier = Modifier.fillMaxWidth()
-                .then(inputFocusRequester?.let(Modifier::focusRequester) ?: Modifier)
-                .onFocusChanged { focused = it.isFocused }
+                .focusRequester(fieldRequester)
+                .focusProperties { canFocus = editing }
+                .onFocusChanged { if (editing && !it.isFocused) editing = false }
                 .then(if (onSubmit != null) Modifier.onKeyEvent { event ->
                     if (event.type == KeyEventType.KeyUp && (event.key == Key.Enter || event.key == Key.NumPadEnter)) { onSubmit(); true } else false
                 } else Modifier),
