@@ -12,6 +12,8 @@ import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -983,10 +985,11 @@ fun LocalVideoListScreen(
 }
 
 @Composable
-fun SettingsScreen(
+internal fun SettingsScreen(
     repository: MacCmsRepository,
     tmdbSettings: TmdbSettingsStore,
     tmdbRepository: TmdbMetadataRepository,
+    hubSyncEngine: HubSyncEngine,
     menuSettings: NavigationMenuSettings,
     entryFocusRequester: FocusRequester,
     onMenuSettingsChange: (NavigationMenuSettings) -> Unit
@@ -1049,6 +1052,14 @@ fun SettingsScreen(
             }
             Spacer(Modifier.height(8.dp))
             SettingsMenuItem(
+                "云端同步",
+                selected = selectedSetting == "云端同步",
+                modifier = Modifier.focusProperties { right = detailEntryFocusRequester }
+            ) {
+                selectedSetting = "云端同步"
+            }
+            Spacer(Modifier.height(8.dp))
+            SettingsMenuItem(
                 "菜单配置",
                 selected = selectedSetting == "菜单配置",
                 modifier = Modifier.focusProperties { right = detailEntryFocusRequester }
@@ -1074,8 +1085,10 @@ fun SettingsScreen(
                 )
             } else if (selectedSetting == "版本更新") {
                 AppVersionPage(versionName, versionCode, detailEntryFocusRequester)
+            } else if (selectedSetting == "云端同步") {
+                HubSyncPage(hubSyncEngine, detailEntryFocusRequester)
             } else if (selectedSetting == "TMDB 数据") {
-                TmdbSettingsPage(tmdbSettings, tmdbRepository, detailEntryFocusRequester)
+                TmdbSettingsPage(tmdbSettings, tmdbRepository, detailEntryFocusRequester, hubSyncEngine.credentials.isBound)
             } else {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -1236,7 +1249,8 @@ private fun AppVersionPage(
 private fun TmdbSettingsPage(
     settings: TmdbSettingsStore,
     repository: TmdbMetadataRepository,
-    entryFocusRequester: FocusRequester
+    entryFocusRequester: FocusRequester,
+    cloudManaged: Boolean
 ) {
     var token by remember { mutableStateOf("") }
     var showToken by remember { mutableStateOf(false) }
@@ -1260,7 +1274,15 @@ private fun TmdbSettingsPage(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
                 .background(Color(0xFF151D28)).padding(22.dp)
         ) {
-            Text("访问凭证", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            if (cloudManaged) {
+            Text("TMDB 数据由云端管理", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Text("绑定期间 TMDB Key 与共享偏好为只读；请在 Cineo Hub 管理页修改。", color = AccentGold, fontSize = 13.sp)
+            Spacer(Modifier.height(10.dp))
+            Text(if (configured) "已收到云端 TMDB Key（本机以 Keystore 加密保存，不回显）。" else "云端尚未配置 TMDB Key。", color = ScreenMuted, fontSize = 12.sp)
+            Text("TMDB 语言：${settings.database.readAppSetting("hub.tmdb_language") ?: "zh-CN"} · 包含成人内容：${settings.database.readAppSetting("hub.include_adult") ?: "false"}", color = ScreenMuted, fontSize = 12.sp)
+        } else {
+        Text("访问凭证", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
             Text(
                 if (configured) "已配置 · Token 使用 Android Keystore 加密保存，不会回显。输入新 Token 可替换现有配置。"
@@ -1330,6 +1352,7 @@ private fun TmdbSettingsPage(
                 Spacer(Modifier.height(12.dp))
                 Text(it, color = Color(0xFFFF9C8C), fontSize = 12.sp)
             }
+        }
             Spacer(Modifier.height(22.dp))
             Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = .08f)))
             Spacer(Modifier.height(18.dp))
@@ -1358,6 +1381,237 @@ private fun TmdbSettingsPage(
             }
         }
     }
+}
+
+@Composable
+private fun HubSyncPage(engine: HubSyncEngine, entryFocusRequester: FocusRequester) {
+    val scope = rememberCoroutineScope()
+    val credentials = engine.credentials
+    var bound by remember { mutableStateOf(credentials.isBound) }
+    var hubAddress by remember { mutableStateOf(credentials.hubUrl.orEmpty()) }
+    var pin by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<SyncStatus?>(null) }
+    var pushStatus by remember { mutableStateOf<SyncStatus?>(null) }
+    var pullStatus by remember { mutableStateOf<SyncStatus?>(null) }
+    var pushProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var intervalSeconds by remember { mutableIntStateOf(engine.progressIntervalSeconds()) }
+    var lastSync by remember { mutableLongStateOf(credentials.lastSyncAt) }
+    var showRemoveDialog by remember { mutableStateOf(false) }
+    var showDiscardDialog by remember { mutableStateOf(false) }
+    var staleCount by remember { mutableIntStateOf(engine.staleOutboxCount()) }
+    var removeNotice by remember { mutableStateOf<String?>(null) }
+
+    Column(Modifier.fillMaxSize().padding(end = 8.dp).verticalScroll(rememberScrollState())) {
+        Text("云端同步", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(7.dp))
+        Text("收藏、观看历史、分集进度与站点会在后台安全同步；Hub 暂不可用时仍可继续本地使用。", color = ScreenMuted, fontSize = 13.sp)
+        Spacer(Modifier.height(22.dp))
+
+        if (!bound) {
+            Text("连接 Cineo Hub", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(12.dp))
+            InputBox(
+                label = "Hub 地址",
+                value = hubAddress,
+                onValueChange = { hubAddress = it; credentials.saveHubAddress(it) },
+                singleLine = true,
+                keyboardType = KeyboardType.Uri
+            )
+            Spacer(Modifier.height(12.dp))
+            Text("输入 Hub 管理页生成的一次性 8 位 PIN", color = ScreenMuted, fontSize = 13.sp)
+            Spacer(Modifier.height(8.dp))
+            Box(
+                Modifier.fillMaxWidth().focusRequester(entryFocusRequester)
+                    .clip(RoundedCornerShape(10.dp)).background(Color(0xFF202B38))
+                    .padding(horizontal = 16.dp, vertical = 13.dp)
+            ) {
+                BasicTextField(
+                    value = pin,
+                    onValueChange = { pin = it.filter(Char::isDigit).take(8) },
+                    modifier = Modifier.fillMaxWidth(),
+                    readOnly = true,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 23.sp, letterSpacing = 5.sp),
+                    decorationBox = { inner ->
+                        Box {
+                            if (pin.isEmpty()) Text("••••••••", color = ScreenMuted.copy(alpha = .55f), fontSize = 23.sp, letterSpacing = 5.sp)
+                            inner()
+                        }
+                    }
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), listOf("⌫", "0", "清空")).forEach { row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    row.forEach { key ->
+                        TvActionButton(
+                            key,
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                pin = when (key) {
+                                    "⌫" -> pin.dropLast(1)
+                                    "清空" -> ""
+                                    else -> (pin + key).take(8)
+                                }
+                            }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(7.dp))
+            }
+            Spacer(Modifier.height(12.dp))
+            TvActionButton(
+                if (busy) "正在绑定…" else "绑定并同步",
+                primary = true,
+                enabled = !busy && pin.length == 8 && hubAddress.startsWith("http"),
+                onClick = {
+                    if (busy) return@TvActionButton
+                    busy = true
+                    removeNotice = null
+                    scope.launch {
+                        try {
+                            status = engine.bind(hubAddress, pin)
+                            bound = credentials.isBound
+                            lastSync = credentials.lastSyncAt
+                            staleCount = engine.staleOutboxCount()
+                            pin = ""
+                        } catch (failure: HubApiException) {
+                            val api = failure.failure as? HubFailure.Api
+                            status = SyncStatus("绑定失败", api?.let(::hubErrorMessage) ?: "设备绑定失败，请检查 Hub 地址并重试")
+                        } catch (failure: Exception) {
+                            status = SyncStatus("绑定失败", if (failure.message?.contains("PIN") == true) failure.message else "无法连接 Hub，请检查地址和网络")
+                        } finally {
+                            busy = false
+                        }
+                    }
+                }
+            )
+        } else {
+            Text("设备已绑定", color = AccentGold, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Text("Hub：${credentials.hubUrl.orEmpty()}", color = ScreenMuted, fontSize = 13.sp)
+            Text("设备 ID：${credentials.deviceId.orEmpty()}", color = ScreenMuted, fontSize = 12.sp)
+            Text("最近同步：${if (lastSync > 0L) HubSyncEngine.formatLocalTime(lastSync) else "尚未同步"}", color = ScreenMuted, fontSize = 12.sp)
+            credentials.lastFailure?.let { Text("上次状态：$it", color = Color(0xFFFFAA98), fontSize = 12.sp) }
+            if (staleCount > 0) {
+                Spacer(Modifier.height(10.dp))
+                Text("有 $staleCount 条旧待同步更改已隔离，没有上传。请在对应项目重新编辑后再同步，或确认丢弃这些待同步更改。", color = Color(0xFFFFD99A), fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                TvActionButton("丢弃隔离更改", destructive = true, onClick = { showDiscardDialog = true })
+            }
+            Spacer(Modifier.height(14.dp))
+            Text("进度推送间隔（仅保存在本机）", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(7.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(5, 10, 15, 30, 60).forEach { seconds ->
+                    TvActionButton("${seconds}秒", selected = intervalSeconds == seconds, onClick = {
+                        engine.setProgressIntervalSeconds(seconds)
+                        intervalSeconds = seconds
+                    })
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("推送全部时按更新时间解决冲突，以较新的为准。", color = ScreenMuted, fontSize = 12.sp)
+            pushProgress?.let { Text("已推送 ${it.first}/${it.second}", color = AccentGold, fontSize = 12.sp) }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TvActionButton(if (busy) "推送中…" else "推送全部", primary = true,
+                    modifier = Modifier.focusRequester(entryFocusRequester), enabled = !busy, onClick = {
+                        if (busy) return@TvActionButton
+                        busy = true
+                        pushProgress = 0 to 0
+                        scope.launch {
+                            pushStatus = engine.pushAll(onProgress = { done, total -> pushProgress = done to total })
+                            busy = false
+                        }
+                    })
+                TvActionButton(if (busy) "处理中…" else "立即拉取", enabled = !busy, onClick = {
+                    if (busy) return@TvActionButton
+                    busy = true
+                    scope.launch {
+                        pullStatus = engine.pullAndApply(SyncTrigger.MANUAL_PULL)
+                        lastSync = credentials.lastSyncAt
+                        busy = false
+                    }
+                })
+                TvActionButton(if (busy) "处理中…" else "推送并拉取", enabled = !busy, onClick = {
+                    if (busy) return@TvActionButton
+                    busy = true
+                    scope.launch {
+                        status = engine.syncNow()
+                        lastSync = credentials.lastSyncAt
+                        busy = false
+                    }
+                })
+                TvActionButton("解除绑定", destructive = true, enabled = !busy, onClick = { showRemoveDialog = true })
+            }
+            listOfNotNull(pushStatus, pullStatus, status).forEach { actionStatus ->
+                Text("${actionStatus.label} · ${HubSyncEngine.formatLocalTime(actionStatus.at)}${actionStatus.detail?.let { "：$it" }.orEmpty()}", color = if (actionStatus.label.contains("失败")) Color(0xFFFFAA98) else AccentGold, fontSize = 12.sp)
+            }
+        }
+
+        status?.let {
+            Spacer(Modifier.height(14.dp))
+            Text(it.label, color = if (it.label in setOf("已同步", "已绑定")) AccentGold else Color(0xFFFFAA98), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            it.detail?.let { detail -> Text(detail, color = ScreenMuted, fontSize = 12.sp) }
+        }
+        removeNotice?.let { Text(it, color = AccentGold, fontSize = 12.sp) }
+        Spacer(Modifier.height(12.dp))
+        Text("PIN 仅用于一次绑定，设备凭证由 Android Keystore 加密保护。", color = ScreenMuted, fontSize = 11.sp)
+    }
+
+    if (showRemoveDialog) {
+        Dialog(onDismissRequest = { showRemoveDialog = false }) {
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF151D28)).padding(22.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("从本机移除 Hub 绑定？", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("当前 API 契约没有 TV 自助撤销端点。此操作只清除本机凭证并保留本地历史、收藏与进度；请在 Hub 管理页另行撤销此设备。", color = ScreenMuted, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TvActionButton("取消", onClick = { showRemoveDialog = false })
+                    TvActionButton("从本机移除", destructive = true, onClick = {
+                        engine.removeLocalBinding()
+                        bound = false
+                        lastSync = 0L
+                        staleCount = 0
+                        showRemoveDialog = false
+                        removeNotice = "已清除本机凭证；请在 Hub 管理页撤销服务端设备。"
+                    })
+                }
+            }
+        }
+    }
+    if (showDiscardDialog) {
+        Dialog(onDismissRequest = { showDiscardDialog = false }) {
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF151D28)).padding(22.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("丢弃隔离的旧更改？", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("将移除 $staleCount 条不会自动上传的旧 outbox 记录。已同步到本机的内容不会删除；如要再次同步，请先在对应页面重新编辑。", color = ScreenMuted, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TvActionButton("取消", onClick = { showDiscardDialog = false })
+                    TvActionButton("确认丢弃", destructive = true, onClick = {
+                        engine.discardStaleOutbox()
+                        staleCount = engine.staleOutboxCount()
+                        showDiscardDialog = false
+                    })
+                }
+            }
+        }
+    }
+}
+
+private fun hubErrorMessage(failure: HubFailure.Api): String = when (failure.code) {
+    40001 -> "PIN 无效、已过期或已使用，请生成新的 PIN。"
+    40100, 40101 -> "Hub 未接受此设备凭证，请重新检查 PIN。"
+    40300 -> "此操作没有权限。"
+    42900 -> "请求过于频繁，请稍后再试。"
+    42901 -> "已被暂时锁定，请 ${retryMinutes(failure.retryAfterSeconds ?: 60)} 分钟后重试。"
+    50000 -> "Hub 暂时发生错误，请稍后重试。"
+    else -> "Hub 请求失败（${failure.code}）。"
 }
 
 @Composable
@@ -1635,10 +1889,11 @@ private fun ImportSourcesDialog(onDismiss: () -> Unit, onImport: (String) -> Uni
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun RemoteVideoDetailScreen(
+internal fun RemoteVideoDetailScreen(
     repository: MacCmsRepository,
     tmdbSettings: TmdbSettingsStore,
     tmdbRepository: TmdbMetadataRepository,
+    hubSyncEngine: HubSyncEngine,
     entryFocusRequester: FocusRequester,
     initial: RemoteVideo,
     onPlay: (RemoteVideo, PlaybackLine, PlaybackEpisode) -> Unit
@@ -1860,6 +2115,7 @@ fun RemoteVideoDetailScreen(
                         ) {
                             favorite = !favorite
                             repository.setFavorite(video, favorite)
+                            hubSyncEngine.scheduleFavoritePush(repository.favoriteSyncKey(video).orEmpty())
                         }
                     }
                     if (tmdbLoading) {
@@ -2140,7 +2396,8 @@ fun TvVideoPlayerScreen(
     onSelectEpisode: (PlaybackEpisode) -> Unit,
     onExit: () -> Unit,
     onSwitchSource: (RemoteVideo, PlaybackLine, PlaybackEpisode, Long) -> Unit,
-    onProgress: (Long, Long) -> Unit
+    onProgress: (Long, Long) -> Unit,
+    onPause: () -> Unit
 ) {
     var playbackError by remember(episode.url) { mutableStateOf<String?>(null) }
     val context = LocalContext.current
@@ -2168,7 +2425,8 @@ fun TvVideoPlayerScreen(
             onSelectEpisode = onSelectEpisode,
             onExit = onExit,
             onError = { playbackError = it },
-            onProgress = onProgress
+            onProgress = onProgress,
+            onPause = onPause
         )
         if (playbackError != null) {
             Column(Modifier.align(Alignment.Center).clip(RoundedCornerShape(14.dp)).background(Color(0xE0202935)).padding(26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2197,12 +2455,15 @@ private fun PlayerSurface(
     onSelectEpisode: (PlaybackEpisode) -> Unit,
     onExit: () -> Unit,
     onError: (String) -> Unit,
-    onProgress: (Long, Long) -> Unit
+    onProgress: (Long, Long) -> Unit,
+    onPause: () -> Unit
 ) {
     val context = LocalContext.current
     val player = remember { ExoPlayer.Builder(context).build() }
     val errorCallback by rememberUpdatedState(onError)
     val progressCallback by rememberUpdatedState(onProgress)
+    val pauseCallback by rememberUpdatedState(onPause)
+    val playbackStarted = remember(player) { mutableStateOf(false) }
     val selectEpisodeCallback by rememberUpdatedState(onSelectEpisode)
     var showEpisodePanel by remember { mutableStateOf(false) }
     var showSourceSearch by remember { mutableStateOf(false) }
@@ -2241,6 +2502,12 @@ private fun PlayerSurface(
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 errorCallback(error.localizedMessage ?: "播放器无法读取此地址")
+            }
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) playbackStarted.value = true
+            }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (!playWhenReady && playbackStarted.value) pauseCallback()
             }
         }
         player.addListener(listener)
@@ -2633,6 +2900,7 @@ private fun TvActionButton(
     primary: Boolean = false,
     selected: Boolean = false,
     destructive: Boolean = false,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
@@ -2640,11 +2908,11 @@ private fun TvActionButton(
     val shape = RoundedCornerShape(9.dp)
     Box(modifier.onFocusChanged { focused = it.isFocused }
         .clip(shape)
-        .background(when { focused -> Color(0xFFE7EBE7); primary -> Color(0xFF435362); selected -> Color(0xFF594A30); destructive -> Color(0xFF583733); else -> Color(0xFF27313D) })
+        .background(when { focused -> Color(0xFFE7EBE7); primary -> Color(0xFF435362); selected -> Color(0xFF594A30); destructive -> Color(0xFF583733); !enabled -> Color(0xFF1C242E); else -> Color(0xFF27313D) })
         .border(if (focused) 2.dp else 1.dp, if (focused) Color.White else Color.White.copy(alpha = .10f), shape)
-        .clickable(onClick = onClick).focusable().padding(horizontal = 14.dp, vertical = 9.dp),
+        .clickable(enabled = enabled, onClick = onClick).focusable(enabled = enabled).padding(horizontal = 14.dp, vertical = 9.dp),
         contentAlignment = Alignment.Center) {
-        Text(label, color = if (focused) Color(0xFF172026) else if (destructive) Color(0xFFFFC5B9) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(label, color = if (focused) Color(0xFF172026) else if (destructive) Color(0xFFFFC5B9) else if (enabled) Color.White else ScreenMuted.copy(alpha = .55f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
     }
 }
 

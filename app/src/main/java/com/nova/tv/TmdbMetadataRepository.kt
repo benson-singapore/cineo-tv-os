@@ -168,7 +168,7 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
     }
 
     suspend fun validateToken(token: String) = withContext(Dispatchers.IO) {
-        request("configuration", token.trim(), mapOf("language" to "zh-CN"))
+        request("configuration", token.trim(), mapOf("language" to configuredLanguage()))
         Unit
     }
 
@@ -182,7 +182,11 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
             val token = settings.readToken() ?: return@withContext null
             val year = video.year.take(4).toIntOrNull()
             val searchTitle = searchTitle(video.title)
-            val searchParameters = linkedMapOf("query" to searchTitle, "language" to "zh-CN")
+            val searchParameters = linkedMapOf(
+                "query" to searchTitle,
+                "language" to configuredLanguage(),
+                "include_adult" to includeAdultContent().toString()
+            )
             if (year != null) searchParameters["first_air_date_year"] = year.toString()
             var matches = request("search/tv", token, searchParameters).array("results")
             fun chooseMatch(candidates: List<JSONObject>): JSONObject? = candidates.mapNotNull { candidate ->
@@ -192,7 +196,7 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
                 ?.takeIf { it.second >= MIN_MATCH_SCORE }?.first
             var match = chooseMatch(matches)
             if (match == null && year != null) {
-                matches = request("search/tv", token, mapOf("query" to searchTitle, "language" to "zh-CN"))
+                matches = request("search/tv", token, mapOf("query" to searchTitle, "language" to configuredLanguage(), "include_adult" to includeAdultContent().toString()))
                     .array("results")
                 match = chooseMatch(matches)
             }
@@ -202,7 +206,7 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
             val details = request(
                 "tv/$id",
                 token,
-                mapOf("language" to "zh-CN", "append_to_response" to "credits,aggregate_credits")
+                mapOf("language" to configuredLanguage(), "append_to_response" to "credits,aggregate_credits")
             )
             val seasonNumbers = details.array("seasons")
                 .map { it.optInt("season_number", -1) }
@@ -262,8 +266,13 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
     private fun cacheRetentionMillis(): Long =
         settings.cacheRetentionDays * MILLIS_PER_DAY
 
+    private fun configuredLanguage(): String = settings.database.readAppSetting("hub.tmdb_language")
+        ?.takeIf { it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) } ?: "zh-CN"
+
+    private fun includeAdultContent(): Boolean = settings.database.readAppSetting("hub.include_adult") == "true"
+
     private fun readSeason(tvId: Int, seasonNumber: Int, token: String): TmdbSeasonMetadata {
-        val data = request("tv/$tvId/season/$seasonNumber", token, mapOf("language" to "zh-CN"))
+        val data = request("tv/$tvId/season/$seasonNumber", token, mapOf("language" to configuredLanguage()))
         val episodes = data.array("episodes").mapNotNull { episode ->
             val number = episode.optInt("episode_number", 0)
             if (number <= 0) null else TmdbEpisodeMetadata(

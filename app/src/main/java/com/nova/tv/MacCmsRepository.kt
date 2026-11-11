@@ -10,6 +10,9 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.net.URI
+import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -145,18 +148,29 @@ class MacCmsRepository(context: Context) {
         return cursor.use { it.moveToFirst() }
     }
 
+    internal fun favoriteSyncKey(video: RemoteVideo): String? {
+        val source = sources().firstOrNull { it.id == video.sourceId } ?: return null
+        return "${hubSourceKey(source.api)}:${syncEncode(video.remoteId)}"
+    }
+
     fun setFavorite(video: RemoteVideo, favorite: Boolean) {
         val db = database.writableDatabase
+        val source = sources().firstOrNull { it.id == video.sourceId }
+        val key = "${source?.let { hubSourceKey(it.api) } ?: video.sourceId}:${syncEncode(video.remoteId)}"
+        val now = System.currentTimeMillis()
         if (!favorite) {
             db.delete(FAVORITES_TABLE, "video_id = ?", arrayOf(video.id))
+            database.enqueueSyncEnvelope("favorite", key, now, deleted = true, payloadJson = null)
             return
         }
         val values = ContentValues().apply {
             put("video_id", video.id)
             put("video_json", videoToJson(video).toString())
-            put("added_at", System.currentTimeMillis())
+            put("added_at", now)
         }
         db.insertWithOnConflict(FAVORITES_TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+        val payload = JSONObject().put("video", videoToJson(video)).put("source_api", source?.api.orEmpty()).put("added_at", now)
+        database.enqueueSyncEnvelope("favorite", key, now, deleted = false, payloadJson = payload.toString())
     }
 
     fun watchHistory(): List<WatchRecord> {
@@ -223,6 +237,7 @@ class MacCmsRepository(context: Context) {
                 put("updated_at", now)
             }
             db.insertWithOnConflict(WATCH_HISTORY_TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+            enqueueWatchSync(record)
             val overflow = mutableListOf<String>()
             db.rawQuery(
                 "SELECT video_id FROM $WATCH_HISTORY_TABLE ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
@@ -235,11 +250,228 @@ class MacCmsRepository(context: Context) {
         }
     }
 
+    private fun enqueueWatchSync(record: WatchRecord) {
+        val source = sources().firstOrNull { it.id == record.video.sourceId } ?: return
+        val sourceKey = hubSourceKey(source.api)
+        val videoKey = "$sourceKey:${syncEncode(record.video.remoteId)}"
+        val episodeIndex = episodeIndex(record.episode.title)
+        val progressKey = "$videoKey:${syncEncode(record.lineName)}:$episodeIndex"
+        val payload = JSONObject().put("video", videoToJson(record.video)).put("source_api", source.api)
+            .put("line_name", record.lineName).put("episode_title", record.episode.title)
+            .put("line_index", 0).put("episode_index", episodeIndex)
+            .put("position_ms", record.positionMs).put("duration_ms", record.durationMs)
+            .put("updated_at", record.updatedAt)
+        database.writeEpisodeProgress(progressKey, record.video.id, payload.toString(), record.updatedAt)
+        database.enqueueSyncEnvelope("history", videoKey, record.updatedAt, false, payload.toString())
+        database.enqueueSyncEnvelope("progress", progressKey, record.updatedAt, false, payload.toString())
+    }
+
+    private fun enqueueSourceSync(source: VideoSource) {
+        val payload = JSONObject().put("name", source.name).put("api", source.api)
+            .put("detail_url", source.detailUrl).put("enabled", source.enabled)
+            .put("is_adult", source.isAdult).put("is_default", source.isDefault)
+        database.enqueueSyncEnvelope("site", hubSourceKey(source.api), System.currentTimeMillis(), false, payload.toString())
+    }
+
+    fun enqueueLocalSyncSnapshot() {
+        sources().forEach(::enqueueSourceSync)
+        database.readableDatabase.query(FAVORITES_TABLE, arrayOf("video_json", "added_at"), null, null, null, null, null).use { cursor ->
+            while (cursor.moveToNext()) {
+                runCatching { videoFromJson(JSONObject(cursor.getString(0))) }.getOrNull()?.let { video ->
+                    val source = sources().firstOrNull { it.id == video.sourceId } ?: return@let
+                    val updatedAt = cursor.getLong(1)
+                    val key = "${hubSourceKey(source.api)}:${syncEncode(video.remoteId)}"
+                    val payload = JSONObject().put("video", videoToJson(video)).put("source_api", source.api).put("added_at", updatedAt)
+                    database.enqueueSyncEnvelope("favorite", key, updatedAt, false, payload.toString())
+                }
+            }
+        }
+        watchHistory().forEach(::enqueueWatchSync)
+    }
+
+    internal fun applyRemoteSyncEnvelopes(
+        envelopes: List<SyncEnvelope>,
+        localDeviceId: String = "local",
+        isSnapshot: Boolean = false
+    ) {
+        val ordered = envelopes.sortedBy { if (it.entity == "site") 0 else 1 }
+        ordered.forEach { envelope ->
+            val payload = envelope.payload?.let(::JSONObject) ?: JSONObject()
+            when (envelope.entity) {
+                "site" -> applyRemoteSite(envelope, payload, localDeviceId)
+                "favorite" -> applyRemoteFavorite(envelope, payload, localDeviceId, isSnapshot)
+                "history", "progress" -> applyRemoteProgress(envelope, payload, localDeviceId, isSnapshot)
+            }
+        }
+    }
+
+    private fun applyRemoteSite(envelope: SyncEnvelope, payload: JSONObject, localDeviceId: String) {
+        val queued = database.readSyncOutboxItem("site", envelope.key)
+        if (queued != null && compareSyncState(queued.copy(deviceId = localDeviceId), envelope) > 0) return
+        val existing = sources().firstOrNull { hubSourceKey(it.api) == envelope.key } ?: return if (envelope.deleted) Unit else run {
+            val api = payload.optString("api")
+            if (api.isBlank()) return
+            val source = VideoSource("hub-${hubSourceKey(api).take(16)}", payload.optString("name", "同步站点"), api,
+                payload.optString("detail_url"), payload.optBoolean("enabled", true), payload.optBoolean("is_adult"), payload.optBoolean("is_default"))
+            saveSourceFromCloud(source)
+        }
+        if (envelope.deleted) deleteSourceFromCloud(existing)
+        else saveSourceFromCloud(existing.copy(name = payload.optString("name", existing.name), api = payload.optString("api", existing.api),
+            detailUrl = payload.optString("detail_url", existing.detailUrl), enabled = payload.optBoolean("enabled", existing.enabled),
+            isAdult = payload.optBoolean("is_adult", existing.isAdult), isDefault = payload.optBoolean("is_default", existing.isDefault)))
+    }
+
+    private fun saveSourceFromCloud(source: VideoSource) {
+        val all = sources().filterNot { it.id == source.id || (hubSourceKey(it.api) == hubSourceKey(source.api) && it.isDefault && !source.isDefault) }
+        writeSources(if (source.isDefault) all.map { it.copy(isDefault = false) } + source else all + source)
+    }
+
+    private fun deleteSourceFromCloud(source: VideoSource) {
+        writeSources(sources().filterNot { it.id == source.id })
+    }
+
+    private fun localVideo(payload: JSONObject): Pair<RemoteVideo, VideoSource>? {
+        val raw = payload.optJSONObject("video") ?: payload
+        val api = payload.optString("source_api")
+        val source = sources().firstOrNull { api.isNotBlank() && hubSourceKey(it.api) == hubSourceKey(api) }
+            ?: sources().firstOrNull { hubSourceKey(it.api) == envelopeSourceKey(payload, raw) }
+            ?: return null
+        val video = runCatching { videoFromJson(raw) }.getOrNull() ?: return null
+        return video.copy(id = "${source.id}:${video.remoteId}", sourceId = source.id, sourceName = source.name) to source
+    }
+
+    private fun envelopeSourceKey(payload: JSONObject, video: JSONObject): String =
+        payload.optString("source_key").ifBlank { video.optString("sourceKey") }
+
+    private fun favoriteForSyncKey(key: String): RemoteVideo? = favorites().firstOrNull { video ->
+        val source = sources().firstOrNull { it.id == video.sourceId } ?: return@firstOrNull false
+        "${hubSourceKey(source.api)}:${syncEncode(video.remoteId)}" == key
+    }
+
+    private fun favoriteUpdatedAt(videoId: String): Long = database.readableDatabase.query(
+        FAVORITES_TABLE, arrayOf("added_at"), "video_id = ?", arrayOf(videoId), null, null, null, "1"
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
+
+    private fun enqueueFavoriteSync(video: RemoteVideo, updatedAt: Long) {
+        val source = sources().firstOrNull { it.id == video.sourceId } ?: return
+        val key = "${hubSourceKey(source.api)}:${syncEncode(video.remoteId)}"
+        val payload = JSONObject().put("video", videoToJson(video)).put("source_api", source.api).put("added_at", updatedAt)
+        database.enqueueSyncEnvelope("favorite", key, updatedAt, false, payload.toString())
+    }
+
+    private fun applyRemoteFavorite(envelope: SyncEnvelope, payload: JSONObject, localDeviceId: String, isSnapshot: Boolean) {
+        val queued = database.readSyncOutboxItem("favorite", envelope.key)
+        if (queued != null && compareSyncState(queued.copy(deviceId = localDeviceId), envelope) > 0) return
+        val existingFavorite = favoriteForSyncKey(envelope.key)
+        val local = existingFavorite?.let {
+            SyncEnvelope("favorite", envelope.key, favoriteUpdatedAt(it.id), false, null, localDeviceId)
+        }
+        if (envelope.deleted) {
+            if (local != null && compareSyncState(local, envelope) > 0) {
+                if (!isSnapshot) enqueueFavoriteSync(existingFavorite!!, local.updatedAt)
+                return
+            }
+            if (existingFavorite != null) database.writableDatabase.delete(FAVORITES_TABLE, "video_id = ?", arrayOf(existingFavorite.id))
+            return
+        }
+        val (video, _) = localVideo(payload) ?: return
+        if (local != null && compareSyncState(local, envelope) > 0) {
+            if (!isSnapshot) enqueueFavoriteSync(existingFavorite!!, local.updatedAt)
+            return
+        }
+        database.writableDatabase.insertWithOnConflict(FAVORITES_TABLE, null, ContentValues().apply {
+            put("video_id", video.id); put("video_json", videoToJson(video).toString()); put("added_at", envelope.updatedAt)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    private fun historySyncKey(video: RemoteVideo): String? {
+        val source = sources().firstOrNull { it.id == video.sourceId } ?: return null
+        return "${hubSourceKey(source.api)}:${syncEncode(video.remoteId)}"
+    }
+
+    private fun progressSyncKey(record: WatchRecord): String? = historySyncKey(record.video)?.let { videoKey ->
+        "$videoKey:${syncEncode(record.lineName)}:${episodeIndex(record.episode.title)}"
+    }
+
+    private fun applyRemoteProgress(
+        envelope: SyncEnvelope,
+        payload: JSONObject,
+        localDeviceId: String,
+        isSnapshot: Boolean
+    ) {
+        val queued = database.readSyncOutboxItem(envelope.entity, envelope.key)
+        if (queued != null && compareSyncState(queued.copy(deviceId = localDeviceId), envelope) > 0) return
+
+        if (envelope.entity == "progress") {
+            val localEpisode = database.readEpisodeProgress(envelope.key)
+            if (localEpisode != null && compareSyncState(localEpisode.copy(deviceId = localDeviceId), envelope) > 0) {
+                if (!isSnapshot && !localEpisode.deleted) {
+                    database.enqueueSyncEnvelope("progress", envelope.key, localEpisode.updatedAt, false,
+                        JSONObject(localEpisode.payload ?: emptyMap<String, Any?>()).toString())
+                }
+                return
+            }
+            if (envelope.deleted) {
+                database.writeEpisodeProgress(envelope.key, "", "{}", envelope.updatedAt, deleted = true)
+                return
+            }
+        }
+
+        if (envelope.deleted) {
+            val localRecord = watchHistory().firstOrNull { historySyncKey(it.video) == envelope.key }
+            if (localRecord != null && compareSyncState(
+                    SyncEnvelope("history", envelope.key, localRecord.updatedAt, false, null, localDeviceId), envelope
+                ) > 0
+            ) {
+                if (!isSnapshot) enqueueWatchSync(localRecord)
+                return
+            }
+            if (localRecord != null) database.writableDatabase.delete(WATCH_HISTORY_TABLE, "video_id = ?", arrayOf(localRecord.video.id))
+            return
+        }
+
+        val pair = localVideo(payload) ?: return
+        val video = pair.first
+        val record = WatchRecord(video, payload.optString("line_name"), PlaybackEpisode(payload.optString("episode_title"), ""),
+            payload.optLong("position_ms"), payload.optLong("duration_ms"), envelope.updatedAt)
+        if (envelope.entity == "progress") {
+            database.writeEpisodeProgress(envelope.key, video.id, payload.toString(), envelope.updatedAt)
+        }
+
+        val current = watchRecord(video)
+        val currentKey = current?.video?.let(::historySyncKey)
+        if (envelope.entity == "history" && current != null && currentKey == envelope.key) {
+            val local = SyncEnvelope("history", envelope.key, current.updatedAt, false, null, localDeviceId)
+            if (compareSyncState(local, envelope) > 0) {
+                if (!isSnapshot) enqueueWatchSync(current)
+                return
+            }
+        }
+        if (envelope.entity == "progress" && current != null && current.updatedAt >= envelope.updatedAt) return
+
+        val db = database.writableDatabase
+        db.insertWithOnConflict(WATCH_HISTORY_TABLE, null, ContentValues().apply {
+            put("video_id", video.id); put("record_json", watchRecordToJson(record).toString()); put("updated_at", record.updatedAt)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+        val overflow = mutableListOf<String>()
+        db.rawQuery("SELECT video_id FROM $WATCH_HISTORY_TABLE ORDER BY updated_at DESC LIMIT -1 OFFSET ?", arrayOf(MAX_WATCH_HISTORY.toString())).use { c ->
+            while (c.moveToNext()) overflow += c.getString(0)
+        }
+        overflow.forEach { db.delete(WATCH_HISTORY_TABLE, "video_id = ?", arrayOf(it)) }
+    }
+
+    private fun episodeIndex(title: String): Int {
+        val match = Regex("(?:第\\s*)?(\\d+)(?:\\s*[集话期])?").find(title)
+        return match?.groupValues?.get(1)?.toIntOrNull()?.minus(1)?.coerceAtLeast(0) ?: 0
+    }
+
     fun saveSource(source: VideoSource) {
         val current = sources().filterNot { it.id == source.id }
         val updated = if (source.isDefault) current.map { it.copy(isDefault = false) } + source
         else current + source
         writeSources(updated)
+        enqueueSourceSync(source)
+        if (source.isDefault) current.filter { it.isDefault }.forEach(::enqueueSourceSync)
     }
 
     fun setEnabled(source: VideoSource, enabled: Boolean) =
@@ -249,6 +481,7 @@ class MacCmsRepository(context: Context) {
 
     fun deleteSource(source: VideoSource) {
         writeSources(sources().filterNot { it.id == source.id })
+        database.enqueueSyncEnvelope("site", hubSourceKey(source.api), System.currentTimeMillis(), deleted = true, payloadJson = null)
     }
 
     /** Imports the bundled source addresses from the Flutter app's default preset. */

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Theaters
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -51,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.tv.material3.Icon
 import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -86,11 +88,20 @@ private val movies = listOf(
 
 class MainActivity : ComponentActivity() {
     private val videoRepository by lazy { MacCmsRepository(applicationContext) }
+    private val tmdbSettings by lazy { TmdbSettingsStore(applicationContext) }
+    private val hubSyncEngine by lazy { HubSyncEngine(applicationContext, videoRepository, tmdbSettings) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { NovaHome(videoRepository, onExit = { finish() }) }
+        setContent { NovaHome(videoRepository, hubSyncEngine, onExit = { finish() }) }
+        lifecycleScope.launch { hubSyncEngine.pullAndApply(SyncTrigger.LAUNCH_PULL) }
     }
+
+    override fun onResume() { super.onResume() }
+
+    override fun onPause() { super.onPause() }
+
+    override fun onStop() { super.onStop() }
 }
 
 @Composable
@@ -162,7 +173,7 @@ private fun ExitChoiceButton(
 
 @Composable
 @OptIn(ExperimentalTvMaterial3Api::class)
-private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
+private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEngine, onExit: () -> Unit) {
     val context = LocalContext.current
     val menuPreferences = remember(context) { NavigationMenuPreferences(context.applicationContext) }
     val tmdbSettings = remember(context) { TmdbSettingsStore(context.applicationContext) }
@@ -237,6 +248,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
             hadPlayback = true
         } else if (hadPlayback) {
             hadPlayback = false
+            playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit() }
             val requester = when {
                 remoteDetail != null -> detailEntryFocus
                 section == "首页" -> homeContentEntryFocus
@@ -316,6 +328,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
                     repository = videoRepository,
                     tmdbSettings = tmdbSettings,
                     tmdbRepository = tmdbRepository,
+                    hubSyncEngine = hubSyncEngine,
                     menuSettings = menuSettings,
                     entryFocusRequester = settingsMenuEntryFocus,
                     onMenuSettingsChange = { updated ->
@@ -446,6 +459,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
                     repository = videoRepository,
                     tmdbSettings = tmdbSettings,
                     tmdbRepository = tmdbRepository,
+                    hubSyncEngine = hubSyncEngine,
                     entryFocusRequester = detailEntryFocus,
                     initial = remoteDetail!!,
                     onPlay = { video, line, episode ->
@@ -479,6 +493,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
                     playbackEpisode = sourceEpisode
                 },
                 onExit = {
+                    playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit() }
                     playbackEpisode = null
                     playbackVideo = null
                     playbackEpisodes = emptyList()
@@ -493,7 +508,9 @@ private fun NovaHome(videoRepository: MacCmsRepository, onExit: () -> Unit) {
                     videoRepository.saveWatchProgress(
                         playbackVideo!!, playbackLine, playbackEpisode!!, position, duration
                     )
-                }
+                    playbackScope.launch { hubSyncEngine.syncProgressIfDue() }
+                },
+                onPause = { playbackScope.launch { hubSyncEngine.syncAfterPlaybackPause() } }
             )
         }
         // Navigation floats over the artwork without an opaque panel or divider.

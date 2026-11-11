@@ -78,6 +78,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
