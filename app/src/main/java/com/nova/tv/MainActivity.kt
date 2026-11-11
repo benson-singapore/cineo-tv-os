@@ -74,7 +74,8 @@ private val destinations = listOf(
     NavDestination("纪录片", Icons.Filled.Explore),
     NavDestination("继续观看", Icons.Filled.History),
     NavDestination("收藏", Icons.Filled.Favorite, "我的收藏"),
-    NavDestination("搜索", Icons.Filled.Search)
+    NavDestination("搜索", Icons.Filled.Search),
+    NavDestination("Orbit", Icons.Filled.Explore, "Orbit")
 )
 private val settingsDestination = NavDestination("配置", Icons.Filled.Settings)
 private val movies = listOf(
@@ -90,10 +91,11 @@ class MainActivity : ComponentActivity() {
     private val videoRepository by lazy { MacCmsRepository(applicationContext) }
     private val tmdbSettings by lazy { TmdbSettingsStore(applicationContext) }
     private val hubSyncEngine by lazy { HubSyncEngine(applicationContext, videoRepository, tmdbSettings) }
+    private val orbitRepository by lazy { OrbitPluginRepository(DeviceCredentialStore(applicationContext)) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { NovaHome(videoRepository, hubSyncEngine, onExit = { finish() }) }
+        setContent { NovaHome(videoRepository, hubSyncEngine, orbitRepository, onExit = { finish() }) }
         lifecycleScope.launch { hubSyncEngine.pullAndApply(SyncTrigger.LAUNCH_PULL) }
     }
 
@@ -173,7 +175,7 @@ private fun ExitChoiceButton(
 
 @Composable
 @OptIn(ExperimentalTvMaterial3Api::class)
-private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEngine, onExit: () -> Unit) {
+private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEngine, orbitRepository: OrbitPluginRepository, onExit: () -> Unit) {
     val context = LocalContext.current
     val menuPreferences = remember(context) { NavigationMenuPreferences(context.applicationContext) }
     val tmdbSettings = remember(context) { TmdbSettingsStore(context.applicationContext) }
@@ -258,7 +260,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
         }
     }
     LaunchedEffect(section, selected, remoteDetail, playbackEpisode) {
-        if (section !in setOf("首页", "电影", "剧集", "纪录片", "动漫", "短剧", "继续观看", "我的收藏", "搜索", "配置") && remoteDetail == null && playbackEpisode == null) {
+        if (section !in setOf("首页", "电影", "剧集", "纪录片", "动漫", "短剧", "继续观看", "我的收藏", "搜索", "Orbit", "配置") && remoteDetail == null && playbackEpisode == null) {
             firstAction.requestFocus()
         }
     }
@@ -323,6 +325,18 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                         remoteDetail = video
                     },
                     onOpenSources = { section = "配置" }
+                )
+                section == "Orbit" -> OrbitPluginScreen(
+                    repository = orbitRepository,
+                    entryFocusRequester = sectionContentEntryFocus,
+                    onPlay = { video, line, selectedEpisode ->
+                        playbackVideo = video
+                        playbackTitle = video.title
+                        playbackLine = line.name
+                        playbackEpisodes = line.episodes
+                        playbackStartPositionMs = 0L
+                        playbackEpisode = selectedEpisode
+                    }
                 )
                 section == "配置" -> SettingsScreen(
                     repository = videoRepository,

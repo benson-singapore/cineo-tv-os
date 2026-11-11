@@ -64,7 +64,8 @@ class NavigationMenuPreferences(context: Context) {
             "纪录片",
             "继续观看",
             "收藏",
-            "搜索"
+            "搜索",
+            "Orbit"
         )
 
         private const val ORDER_KEY = "order"

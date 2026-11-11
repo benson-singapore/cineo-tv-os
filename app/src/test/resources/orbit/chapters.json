@@ -1,0 +1,34 @@
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "channelId": "duanju",
+    "data": {
+      "description": "已更新至 2 集",
+      "items": [
+        {
+          "content": "脱敏样例内容",
+          "id": "chapter-001",
+          "itemKey": "sample:item-001",
+          "published_at": "2026-11-10T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "title": "第 1 集",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "id": "chapter-001",
+          "itemKey": "sample:item-001",
+          "published_at": "2026-11-10T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "title": "第 1 集",
+          "url": "https://example.invalid/video/1/"
+        }
+      ],
+      "title": "示例列表"
+    },
+    "durationMs": 273,
+    "operation": "chapters",
+    "pluginId": "aihuangdou"
+  }
+}

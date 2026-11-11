@@ -1,0 +1,25 @@
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "channelId": "duanju",
+    "data": {
+      "description": "HLS 直播放流",
+      "items": [
+        {
+          "content": "脱敏样例内容",
+          "id": "chapter-001",
+          "itemKey": "sample:item-001",
+          "published_at": "2026-11-10T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "title": "第 1 集",
+          "url": "https://example.invalid/video/sample.m3u8"
+        }
+      ],
+      "title": "示例列表"
+    },
+    "durationMs": 1148,
+    "operation": "chapterDetail",
+    "pluginId": "aihuangdou"
+  }
+}

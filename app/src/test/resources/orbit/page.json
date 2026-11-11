@@ -1,0 +1,329 @@
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "channelId": "duanju",
+    "data": {
+      "description": "第 2 页 · 22 部作品",
+      "hasMore": true,
+      "items": [
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        },
+        {
+          "content": "脱敏样例内容",
+          "cover": "https://example.invalid/poster.jpg",
+          "id": "item-001",
+          "image": "https://example.invalid/poster.jpg",
+          "itemKey": "sample:item-001",
+          "published_at": "2022-01-01T00:00:00Z",
+          "summary": "脱敏样例简介",
+          "tags": [
+            "样例分类"
+          ],
+          "title": "示例作品",
+          "url": "https://example.invalid/video/1/"
+        }
+      ],
+      "next": {
+        "page": "3",
+        "section": "ai-duanju"
+      },
+      "title": "示例列表"
+    },
+    "durationMs": 1273,
+    "operation": "page",
+    "pluginId": "aihuangdou"
+  }
+}

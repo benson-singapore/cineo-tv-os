@@ -1,0 +1,332 @@
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "plugin": {
+      "pluginId": "aihuangdou",
+      "name": "黄桃短剧",
+      "version": "1.0.2",
+      "status": "enabled",
+      "executable": true,
+      "capabilities": [
+        "feed",
+        "playback"
+      ],
+      "operations": [
+        "feed",
+        "search",
+        "page",
+        "chapters",
+        "chapterDetail"
+      ],
+      "channels": [
+        {
+          "id": "duanju",
+          "label": "AI成人短剧",
+          "route": "/aihuangdou/list",
+          "status": "enabled",
+          "params": {
+            "page": "1",
+            "section": "ai-duanju"
+          },
+          "operations": [
+            {
+              "id": "feed",
+              "label": "刷新列表",
+              "operation": "feed",
+              "route": "/aihuangdou/list",
+              "required": [],
+              "optional": [
+                {
+                  "name": "page"
+                },
+                {
+                  "name": "section"
+                }
+              ],
+              "target": [],
+              "defaults": {
+                "page": "1",
+                "section": "ai-duanju"
+              }
+            },
+            {
+              "id": "page",
+              "label": "列表翻页",
+              "operation": "page",
+              "route": "/aihuangdou/list",
+              "required": [],
+              "optional": [
+                {
+                  "name": "section"
+                }
+              ],
+              "target": [],
+              "pagination": {
+                "style": "offset",
+                "param": "page",
+                "default": "1",
+                "requiresNext": false,
+                "autoIncrement": true
+              },
+              "defaults": {
+                "page": "1",
+                "section": "ai-duanju"
+              }
+            },
+            {
+              "id": "chapters",
+              "label": "章节列表",
+              "operation": "chapters",
+              "route": "/aihuangdou/chapters/:id",
+              "required": [],
+              "optional": [
+                {
+                  "name": "page"
+                },
+                {
+                  "name": "section"
+                }
+              ],
+              "target": [
+                {
+                  "field": "itemId",
+                  "name": "id",
+                  "label": "父条目 ID"
+                }
+              ],
+              "defaults": {
+                "page": "1",
+                "section": "ai-duanju"
+              }
+            },
+            {
+              "id": "chapterDetail",
+              "label": "章节详情",
+              "operation": "chapterDetail",
+              "route": "/aihuangdou/episode/:chapterId",
+              "required": [],
+              "optional": [
+                {
+                  "name": "page"
+                },
+                {
+                  "name": "section"
+                }
+              ],
+              "target": [
+                {
+                  "field": "itemId",
+                  "name": "id",
+                  "label": "父条目 ID"
+                },
+                {
+                  "field": "chapterId",
+                  "name": "chapterId",
+                  "label": "章节 ID"
+                }
+              ],
+              "defaults": {
+                "page": "1",
+                "section": "ai-duanju"
+              }
+            }
+          ],
+          "features": {
+            "chapters": {
+              "detail": {
+                "idParam": "chapterId",
+                "parentParam": "id",
+                "persist": false,
+                "route": "/aihuangdou/episode/:chapterId"
+              },
+              "idParam": "id",
+              "itemLabel": "集",
+              "label": "选集",
+              "limit": 500,
+              "persist": true,
+              "route": "/aihuangdou/chapters/:id"
+            },
+            "feed": {
+              "limit": 48,
+              "persist": true,
+              "refresh": true
+            },
+            "pagination": {
+              "default": "1",
+              "param": "page",
+              "style": "offset"
+            }
+          }
+        },
+        {
+          "id": "search",
+          "label": "搜索",
+          "route": "/aihuangdou/search/:query",
+          "status": "enabled",
+          "params": {
+            "page": "1",
+            "query": ""
+          },
+          "operations": [
+            {
+              "id": "feed",
+              "label": "刷新列表",
+              "operation": "feed",
+              "route": "/aihuangdou/search/:query",
+              "required": [],
+              "optional": [
+                {
+                  "name": "page"
+                },
+                {
+                  "name": "query"
+                }
+              ],
+              "target": [],
+              "defaults": {
+                "page": "1",
+                "query": ""
+              }
+            },
+            {
+              "id": "search",
+              "label": "搜索",
+              "operation": "search",
+              "route": "/aihuangdou/search/:query",
+              "required": [
+                {
+                  "name": "query",
+                  "label": "搜索关键词"
+                }
+              ],
+              "optional": [
+                {
+                  "name": "page"
+                }
+              ],
+              "target": [],
+              "defaults": {
+                "page": "1",
+                "query": ""
+              }
+            },
+            {
+              "id": "page",
+              "label": "列表翻页",
+              "operation": "page",
+              "route": "/aihuangdou/search/:query",
+              "required": [],
+              "optional": [
+                {
+                  "name": "query"
+                }
+              ],
+              "target": [],
+              "pagination": {
+                "style": "offset",
+                "param": "page",
+                "default": "1",
+                "requiresNext": false,
+                "autoIncrement": true
+              },
+              "defaults": {
+                "page": "1",
+                "query": ""
+              }
+            },
+            {
+              "id": "chapters",
+              "label": "章节列表",
+              "operation": "chapters",
+              "route": "/aihuangdou/chapters/:id",
+              "required": [],
+              "optional": [
+                {
+                  "name": "page"
+                },
+                {
+                  "name": "query"
+                }
+              ],
+              "target": [
+                {
+                  "field": "itemId",
+                  "name": "id",
+                  "label": "父条目 ID"
+                }
+              ],
+              "defaults": {
+                "page": "1",
+                "query": ""
+              }
+            },
+            {
+              "id": "chapterDetail",
+              "label": "章节详情",
+              "operation": "chapterDetail",
+              "route": "/aihuangdou/episode/:chapterId",
+              "required": [],
+              "optional": [
+                {
+                  "name": "page"
+                },
+                {
+                  "name": "query"
+                }
+              ],
+              "target": [
+                {
+                  "field": "itemId",
+                  "name": "id",
+                  "label": "父条目 ID"
+                },
+                {
+                  "field": "chapterId",
+                  "name": "chapterId",
+                  "label": "章节 ID"
+                }
+              ],
+              "defaults": {
+                "page": "1",
+                "query": ""
+              }
+            }
+          ],
+          "features": {
+            "chapters": {
+              "detail": {
+                "idParam": "chapterId",
+                "parentParam": "id",
+                "persist": false,
+                "route": "/aihuangdou/episode/:chapterId"
+              },
+              "idParam": "id",
+              "itemLabel": "集",
+              "label": "选集",
+              "limit": 500,
+              "persist": true,
+              "route": "/aihuangdou/chapters/:id"
+            },
+            "feed": {
+              "limit": 48,
+              "persist": false,
+              "refresh": false
+            },
+            "pagination": {
+              "default": "1",
+              "param": "page",
+              "style": "offset"
+            },
+            "search": {
+              "param": "query",
+              "required": true
+            }
+          }
+        }
+      ],
+      "channelsUrl": "/v1/admin/capabilities/plugins/aihuangdou",
+      "invokeUrl": "/v1/admin/capabilities/plugins/aihuangdou/invoke"
+    }
+  }
+}
