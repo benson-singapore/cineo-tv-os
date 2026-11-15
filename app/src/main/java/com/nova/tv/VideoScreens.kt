@@ -2808,8 +2808,27 @@ private suspend fun loadArtwork(url: String): LoadedArtwork? {
     if (url.isBlank()) return null
     return withContext(Dispatchers.IO) {
         runCatching {
-            val connection = URL(url).openConnection().apply { connectTimeout = 7000; readTimeout = 9000 }
-            val bitmap = connection.getInputStream().use { BitmapFactory.decodeStream(it) } ?: return@runCatching null
+            val candidates = listOfNotNull(url, OrbitArtworkDecoder.webpFallback(url))
+            val bitmap = candidates.firstNotNullOfOrNull { candidate ->
+                runCatching {
+                    val connection = URL(candidate).openConnection().apply { connectTimeout = 7000; readTimeout = 9000 }
+                    try {
+                        val bytes = connection.getInputStream().use { stream ->
+                            val limit = 16 * 1024 * 1024
+                            val data = stream.readNBytes(limit + 1)
+                            require(data.size <= limit) { "Artwork exceeds byte limit" }
+                            data
+                        }
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            ?: if (OrbitArtworkDecoder.supports(candidate)) {
+                                val plain = OrbitArtworkDecoder.decrypt(bytes)
+                                BitmapFactory.decodeByteArray(plain, 0, plain.size)
+                            } else null
+                    } finally {
+                        (connection as? java.net.HttpURLConnection)?.disconnect()
+                    }
+                }.getOrNull()
+            } ?: return@runCatching null
             val stepX = (bitmap.width / 24).coerceAtLeast(1)
             val stepY = (bitmap.height / 24).coerceAtLeast(1)
             var red = 0L
