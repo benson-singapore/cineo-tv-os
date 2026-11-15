@@ -1014,6 +1014,7 @@ internal fun SettingsScreen(
     var pendingTest by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val detailEntryFocusRequester = remember { FocusRequester() }
+    val selectedSettingFocusRequester = remember { FocusRequester() }
 
     LaunchedEffect(entryFocusRequester) {
         entryFocusRequester.requestFocus()
@@ -1038,6 +1039,7 @@ internal fun SettingsScreen(
                 "视频源",
                 selected = selectedSetting == "视频源",
                 modifier = Modifier.focusRequester(entryFocusRequester)
+                    .then(if (selectedSetting == "视频源") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
                     .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "视频源"
@@ -1046,7 +1048,9 @@ internal fun SettingsScreen(
             SettingsMenuItem(
                 "TMDB 数据",
                 selected = selectedSetting == "TMDB 数据",
-                modifier = Modifier.focusProperties { right = detailEntryFocusRequester }
+                modifier = Modifier
+                    .then(if (selectedSetting == "TMDB 数据") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "TMDB 数据"
             }
@@ -1054,7 +1058,9 @@ internal fun SettingsScreen(
             SettingsMenuItem(
                 "云端同步",
                 selected = selectedSetting == "云端同步",
-                modifier = Modifier.focusProperties { right = detailEntryFocusRequester }
+                modifier = Modifier
+                    .then(if (selectedSetting == "云端同步") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "云端同步"
             }
@@ -1062,7 +1068,9 @@ internal fun SettingsScreen(
             SettingsMenuItem(
                 "菜单配置",
                 selected = selectedSetting == "菜单配置",
-                modifier = Modifier.focusProperties { right = detailEntryFocusRequester }
+                modifier = Modifier
+                    .then(if (selectedSetting == "菜单配置") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "菜单配置"
             }
@@ -1070,13 +1078,18 @@ internal fun SettingsScreen(
             SettingsMenuItem(
                 "版本更新",
                 selected = selectedSetting == "版本更新",
-                modifier = Modifier.focusProperties { right = detailEntryFocusRequester }
+                modifier = Modifier
+                    .then(if (selectedSetting == "版本更新") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "版本更新"
             }
         }
 
-        Column(Modifier.weight(1f).fillMaxHeight()) {
+        Column(
+            Modifier.weight(1f).fillMaxHeight()
+                .focusProperties { left = selectedSettingFocusRequester }
+        ) {
             if (selectedSetting == "菜单配置") {
                 MenuConfigurationPage(
                     settings = menuSettings,
@@ -1086,7 +1099,7 @@ internal fun SettingsScreen(
             } else if (selectedSetting == "版本更新") {
                 AppVersionPage(versionName, versionCode, detailEntryFocusRequester)
             } else if (selectedSetting == "云端同步") {
-                HubSyncPage(hubSyncEngine, detailEntryFocusRequester)
+                HubSyncPage(hubSyncEngine, detailEntryFocusRequester, selectedSettingFocusRequester)
             } else if (selectedSetting == "TMDB 数据") {
                 TmdbSettingsPage(tmdbSettings, tmdbRepository, detailEntryFocusRequester, hubSyncEngine.credentials.isBound)
             } else {
@@ -1384,7 +1397,11 @@ private fun TmdbSettingsPage(
 }
 
 @Composable
-private fun HubSyncPage(engine: HubSyncEngine, entryFocusRequester: FocusRequester) {
+private fun HubSyncPage(
+    engine: HubSyncEngine,
+    entryFocusRequester: FocusRequester,
+    leftFocusRequester: FocusRequester
+) {
     val scope = rememberCoroutineScope()
     val credentials = engine.credentials
     var bound by remember { mutableStateOf(credentials.isBound) }
@@ -1421,51 +1438,21 @@ private fun HubSyncPage(engine: HubSyncEngine, entryFocusRequester: FocusRequest
             Spacer(Modifier.height(12.dp))
             Text("输入 Hub 管理页生成的一次性 8 位 PIN", color = ScreenMuted, fontSize = 13.sp)
             Spacer(Modifier.height(8.dp))
-            Box(
-                Modifier.fillMaxWidth().focusRequester(entryFocusRequester)
-                    .clip(RoundedCornerShape(10.dp)).background(Color(0xFF202B38))
-                    .padding(horizontal = 16.dp, vertical = 13.dp)
-            ) {
-                BasicTextField(
-                    value = pin,
-                    onValueChange = { pin = it.filter(Char::isDigit).take(8) },
-                    modifier = Modifier.fillMaxWidth(),
-                    readOnly = true,
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 23.sp, letterSpacing = 5.sp),
-                    decorationBox = { inner ->
-                        Box {
-                            if (pin.isEmpty()) Text("••••••••", color = ScreenMuted.copy(alpha = .55f), fontSize = 23.sp, letterSpacing = 5.sp)
-                            inner()
-                        }
-                    }
-                )
-            }
-            Spacer(Modifier.height(12.dp))
-            listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), listOf("⌫", "0", "清空")).forEach { row ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    row.forEach { key ->
-                        TvActionButton(
-                            key,
-                            modifier = Modifier.weight(1f),
-                            onClick = {
-                                pin = when (key) {
-                                    "⌫" -> pin.dropLast(1)
-                                    "清空" -> ""
-                                    else -> (pin + key).take(8)
-                                }
-                            }
-                        )
-                    }
-                }
-                Spacer(Modifier.height(7.dp))
-            }
+            InputBox(
+                label = "8 位 PIN",
+                value = pin,
+                onValueChange = { pin = it.filter(Char::isDigit).take(8) },
+                inputFocusRequester = entryFocusRequester,
+                keyboardType = KeyboardType.Number,
+                obscureText = true
+            )
             Spacer(Modifier.height(12.dp))
             TvActionButton(
                 if (busy) "正在绑定…" else "绑定并同步",
                 primary = true,
-                enabled = !busy && pin.length == 8 && hubAddress.startsWith("http"),
+                // Keep the active control focusable while the request runs. Removing
+                // the focused node makes Compose fall back to the first nav item.
+                enabled = pin.length == 8 && hubAddress.startsWith("http"),
                 onClick = {
                     if (busy) return@TvActionButton
                     busy = true
@@ -1517,7 +1504,8 @@ private fun HubSyncPage(engine: HubSyncEngine, entryFocusRequester: FocusRequest
             pushProgress?.let { Text("已推送 ${it.first}/${it.second}", color = AccentGold, fontSize = 12.sp) }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 TvActionButton(if (busy) "推送中…" else "推送全部", primary = true,
-                    modifier = Modifier.focusRequester(entryFocusRequester), enabled = !busy, onClick = {
+                    modifier = Modifier.focusRequester(entryFocusRequester)
+                        .focusProperties { left = leftFocusRequester }, onClick = {
                         if (busy) return@TvActionButton
                         busy = true
                         pushProgress = 0 to 0
@@ -1526,7 +1514,8 @@ private fun HubSyncPage(engine: HubSyncEngine, entryFocusRequester: FocusRequest
                             busy = false
                         }
                     })
-                TvActionButton(if (busy) "处理中…" else "立即拉取", enabled = !busy, onClick = {
+                TvActionButton(if (busy) "处理中…" else "立即拉取",
+                    modifier = Modifier.focusProperties { left = entryFocusRequester }, onClick = {
                     if (busy) return@TvActionButton
                     busy = true
                     scope.launch {
@@ -1535,7 +1524,7 @@ private fun HubSyncPage(engine: HubSyncEngine, entryFocusRequester: FocusRequest
                         busy = false
                     }
                 })
-                TvActionButton(if (busy) "处理中…" else "推送并拉取", enabled = !busy, onClick = {
+                TvActionButton(if (busy) "处理中…" else "推送并拉取", onClick = {
                     if (busy) return@TvActionButton
                     busy = true
                     scope.launch {
@@ -1544,7 +1533,9 @@ private fun HubSyncPage(engine: HubSyncEngine, entryFocusRequester: FocusRequest
                         busy = false
                     }
                 })
-                TvActionButton("解除绑定", destructive = true, enabled = !busy, onClick = { showRemoveDialog = true })
+                TvActionButton("解除绑定", destructive = true, onClick = {
+                    if (!busy) showRemoveDialog = true
+                })
             }
             listOfNotNull(pushStatus, pullStatus, status).forEach { actionStatus ->
                 Text("${actionStatus.label} · ${HubSyncEngine.formatLocalTime(actionStatus.at)}${actionStatus.detail?.let { "：$it" }.orEmpty()}", color = if (actionStatus.label.contains("失败")) Color(0xFFFFAA98) else AccentGold, fontSize = 12.sp)
@@ -2882,6 +2873,14 @@ private fun InputBox(
         .border(if (focused || editing) 2.dp else 1.dp, if (focused || editing) AccentGold else Color.White.copy(alpha = .12f), RoundedCornerShape(8.dp))
         .then(if (inputFocusRequester != null) Modifier.focusRequester(inputFocusRequester) else Modifier)
         .onFocusChanged { focused = it.isFocused }
+        .onKeyEvent { event ->
+            // 遥控器确认键（DPAD_CENTER / Enter）进入编辑态；仅在未编辑时拦截。
+            if (!editing && event.type == KeyEventType.KeyUp &&
+                (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.DirectionCenter)) {
+                editing = true
+                true
+            } else false
+        }
         .focusable(!editing)
         .clickable { editing = true }
         .padding(horizontal = 14.dp, vertical = 9.dp)) {
