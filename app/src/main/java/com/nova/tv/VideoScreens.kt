@@ -2675,6 +2675,7 @@ private fun PlayerSurface(
 private class EpisodeAwarePlayerView(context: android.content.Context) : PlayerView(context) {
     var onDownPressed: (() -> Boolean)? = null
     private var touchStartY = Float.NaN
+    private var seekingKey: Int? = null
 
     override fun onInterceptTouchEvent(event: android.view.MotionEvent): Boolean {
         when (event.actionMasked) {
@@ -2692,6 +2693,30 @@ private class EpisodeAwarePlayerView(context: android.content.Context) : PlayerV
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT ||
+            event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+        ) {
+            if (event.action == android.view.KeyEvent.ACTION_UP && seekingKey == event.keyCode) {
+                seekingKey = null
+                return true
+            }
+            val progress = findViewById<android.view.View>(androidx.media3.ui.R.id.exo_progress)
+            if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+                (seekingKey == event.keyCode || !isControllerFullyVisible || progress?.hasFocus() == true)
+            ) {
+                val currentPlayer = player
+                if (currentPlayer != null && currentPlayer.isCurrentMediaItemSeekable) {
+                    seekingKey = event.keyCode
+                    val offset = if (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) 10_000L else -10_000L
+                    val target = (currentPlayer.currentPosition + offset).coerceAtLeast(0L)
+                    val duration = currentPlayer.duration
+                    currentPlayer.seekTo(if (duration >= 0) target.coerceAtMost(duration) else target)
+                    showController()
+                    progress?.requestFocus()
+                    return true
+                }
+            }
+        }
         if (event.action == android.view.KeyEvent.ACTION_DOWN &&
             event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN &&
             onDownPressed?.invoke() == true
