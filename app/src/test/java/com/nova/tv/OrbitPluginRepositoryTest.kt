@@ -10,6 +10,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OrbitPluginRepositoryTest {
+    @Test fun expandsPluginWithoutBoundChannel() {
+        val data = parseHubDataEnvelope(200, fixture("capabilities.json"))
+        val config = OrbitPluginConfig("config-1", "Orbit", "aihuangdou", "")
+        val channels = expandOrbitChannels(config, data)
+        assertTrue(channels.any { it.channelId == "duanju" })
+        assertEquals(parseOrbitChannel(data, "duanju").label, channels.first { it.channelId == "duanju" }.channelLabel)
+        assertTrue(channels.any { it.channelId == "search" })
+        assertTrue(channels.all { it.id == config.id && it.channelId.isNotBlank() })
+        assertEquals(channels.size, channels.map { it.channelId }.distinct().size)
+    }
+
     @Test fun parsesHubEnvelopeAndChannelScopedCapabilities() {
         val envelope = parseHubDataEnvelope(200, fixture("capabilities.json"))
         val channel = parseOrbitChannel(envelope, "duanju")
@@ -76,6 +87,23 @@ class OrbitPluginRepositoryTest {
         val media = safeMediaUri("https://media.example.invalid/a.m3u8?sig=fixture")
         assertEquals("https://media.example.invalid/a.m3u8?sig=fixture", media)
         assertFalse(media.orEmpty().contains("device-token"))
+    }
+
+    @Test fun allowsPluginListWithEitherHubBaseFormat() {
+        for (base in listOf("https://hub.example.invalid", "https://hub.example.invalid/api/v1/")) {
+            val request = createOrbitHubRequest(base, "/device/orbit-plugins", "device-token-fixture")
+            assertEquals("https://hub.example.invalid/api/v1/device/orbit-plugins", request.url)
+            assertEquals("Bearer device-token-fixture", request.authorization)
+            assertNull(request.body)
+        }
+    }
+
+    @Test fun rejectsPathsOutsideOrbitDeviceNamespace() {
+        for (path in listOf("/device/orbit-plugins-other", "/admin/orbit-plugins", "https://orbit.example.invalid/invoke")) {
+            assertThrows(IllegalArgumentException::class.java) {
+                createOrbitHubRequest("https://hub.example.invalid", path, "device-token-fixture")
+            }
+        }
     }
 
     @Test fun deviceCredentialIsAttachedOnlyToHubDeviceRequest() {

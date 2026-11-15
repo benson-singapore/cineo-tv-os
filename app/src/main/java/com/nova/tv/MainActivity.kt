@@ -177,6 +177,7 @@ private fun ExitChoiceButton(
 @OptIn(ExperimentalTvMaterial3Api::class)
 private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEngine, orbitRepository: OrbitPluginRepository, onExit: () -> Unit) {
     val context = LocalContext.current
+    val orbitHistory = remember(context) { OrbitWatchHistory(context) }
     val menuPreferences = remember(context) { NavigationMenuPreferences(context.applicationContext) }
     val tmdbSettings = remember(context) { TmdbSettingsStore(context.applicationContext) }
     val tmdbRepository = remember(tmdbSettings) { TmdbMetadataRepository(tmdbSettings) }
@@ -200,6 +201,8 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
     var preview by remember { mutableStateOf(false) }
     var remoteDetail by remember { mutableStateOf<RemoteVideo?>(null) }
     var playbackEpisode by remember { mutableStateOf<PlaybackEpisode?>(null) }
+    var invalidateOrbitPlayback by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var orbitPlayback by remember { mutableStateOf<OrbitWatchSelection?>(null) }
     var playbackVideo by remember { mutableStateOf<RemoteVideo?>(null) }
     var playbackTitle by remember { mutableStateOf("") }
     var playbackLine by remember { mutableStateOf("") }
@@ -224,11 +227,13 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
     val firstAction = remember { FocusRequester() }
     val homeContentEntryFocus = remember { FocusRequester() }
     var lastHomeContentFocus by remember { mutableStateOf<FocusRequester?>(null) }
-    val sectionNavigationFocus = remember(section, visibleDestinations) { FocusRequester() }
+    val sectionNavigationFocus = remember(visibleDestinations) { FocusRequester() }
     val sectionContentEntryFocus = remember(section) { FocusRequester() }
     val settingsMenuEntryFocus = remember { FocusRequester() }
     val detailEntryFocus = remember { FocusRequester() }
     var detailReturnFocusRequester by remember { mutableStateOf<FocusRequester?>(null) }
+    var playbackReturnFocusRequester by remember { mutableStateOf<FocusRequester?>(null) }
+    var latestNavRightRequest by remember { mutableIntStateOf(0) }
     var hadRemoteDetail by remember { mutableStateOf(false) }
     var hadPlayback by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
@@ -250,13 +255,16 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
             hadPlayback = true
         } else if (hadPlayback) {
             hadPlayback = false
-            playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit() }
-            val requester = when {
+            if (orbitPlayback == null) playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit() }
+            orbitPlayback = null
+            val fallbackRequester = when {
                 remoteDetail != null -> detailEntryFocus
                 section == "首页" -> homeContentEntryFocus
                 else -> sectionNavigationFocus
             }
-            runCatching { requester.requestFocus() }
+            val returned = runCatching { playbackReturnFocusRequester?.requestFocus() == true }.getOrDefault(false)
+            if (!returned) runCatching { fallbackRequester.requestFocus() }
+            playbackReturnFocusRequester = null
         }
     }
     LaunchedEffect(section, selected, remoteDetail, playbackEpisode) {
@@ -329,12 +337,17 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                 section == "Orbit" -> OrbitPluginScreen(
                     repository = orbitRepository,
                     entryFocusRequester = sectionContentEntryFocus,
-                    onPlay = { video, line, selectedEpisode ->
+                    menuFocusRequester = sectionNavigationFocus,
+                    history = orbitHistory,
+                    onPlay = { video, line, selectedEpisode, returnFocusRequester, selection, startPosition, invalidate ->
+                        invalidateOrbitPlayback = invalidate
+                        orbitPlayback = selection
+                        playbackReturnFocusRequester = returnFocusRequester
                         playbackVideo = video
                         playbackTitle = video.title
                         playbackLine = line.name
                         playbackEpisodes = line.episodes
-                        playbackStartPositionMs = 0L
+                        playbackStartPositionMs = startPosition
                         playbackEpisode = selectedEpisode
                     }
                 )
@@ -476,7 +489,8 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     hubSyncEngine = hubSyncEngine,
                     entryFocusRequester = detailEntryFocus,
                     initial = remoteDetail!!,
-                    onPlay = { video, line, episode ->
+                    onPlay = { video, line, episode, returnFocusRequester ->
+                        playbackReturnFocusRequester = returnFocusRequester
                         playbackVideo = video
                         playbackTitle = video.title
                         playbackLine = line.name
@@ -490,6 +504,10 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
             }
         }
         if (playbackEpisode != null && playbackVideo != null) {
+            val playingVideo = playbackVideo!!
+            val playingEpisode = playbackEpisode!!
+            val playingLine = playbackLine
+            val playingOrbit = orbitPlayback
             TvVideoPlayerScreen(
                 repository = videoRepository,
                 video = playbackVideo!!,
@@ -498,7 +516,10 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                 lineName = playbackLine,
                 episodes = playbackEpisodes,
                 startPositionMs = playbackStartPositionMs,
+                exitOnBack = playingOrbit != null,
+                onPlaybackError = { if (playingOrbit != null) invalidateOrbitPlayback?.invoke() },
                 onSwitchSource = { sourceVideo, sourceLine, sourceEpisode, position ->
+                    orbitPlayback = null
                     playbackVideo = sourceVideo
                     playbackTitle = sourceVideo.title
                     playbackLine = sourceLine.name
@@ -507,7 +528,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     playbackEpisode = sourceEpisode
                 },
                 onExit = {
-                    playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit() }
+                    if (orbitPlayback == null) playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit() }
                     playbackEpisode = null
                     playbackVideo = null
                     playbackEpisodes = emptyList()
@@ -519,12 +540,13 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     playbackEpisode = selectedEpisode
                 },
                 onProgress = { position, duration ->
-                    videoRepository.saveWatchProgress(
-                        playbackVideo!!, playbackLine, playbackEpisode!!, position, duration
-                    )
-                    playbackScope.launch { hubSyncEngine.syncProgressIfDue() }
+                    if (playingOrbit != null) orbitHistory.save(playingOrbit, position, duration)
+                    else {
+                        videoRepository.saveWatchProgress(playingVideo, playingLine, playingEpisode, position, duration)
+                        playbackScope.launch { hubSyncEngine.syncProgressIfDue() }
+                    }
                 },
-                onPause = { playbackScope.launch { hubSyncEngine.syncAfterPlaybackPause() } }
+                onPause = { if (orbitPlayback == null) playbackScope.launch { hubSyncEngine.syncAfterPlaybackPause() } }
             )
         }
         // Navigation floats over the artwork without an opaque panel or divider.
@@ -559,12 +581,26 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     }
                     val contentRightKey = contentEntryFocus.let { requester -> Modifier.onKeyEvent { event ->
                         if (event.key == Key.DirectionRight && event.type == KeyEventType.KeyDown) {
+                            latestNavRightRequest++
+                            val requestId = latestNavRightRequest
                             if (section == "首页" && remoteDetail == null) {
                                 val restored = runCatching { lastHomeContentFocus?.requestFocus() == true }.getOrDefault(false)
                                 if (restored) return@onKeyEvent true
                                 preserveHomeHeroPositionOnMenuEntry.value = true
                             }
-                            runCatching { requester.requestFocus() }.getOrDefault(false)
+                            val requested = runCatching { requester.requestFocus() }.getOrDefault(false)
+                            if (!requested) playbackScope.launch {
+                                val targetSection = section
+                                val targetDetailId = remoteDetail?.id
+                                repeat(120) {
+                                    delay(100)
+                                    if (requestId != latestNavRightRequest || !navFocused ||
+                                        section != targetSection || remoteDetail?.id != targetDetailId || playbackEpisode != null
+                                    ) return@launch
+                                    if (runCatching { requester.requestFocus() }.getOrDefault(false)) return@launch
+                                }
+                            }
+                            true
                         } else false
                     } }
                     FocusTile(

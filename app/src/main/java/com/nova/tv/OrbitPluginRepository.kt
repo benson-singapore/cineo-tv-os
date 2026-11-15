@@ -9,7 +9,8 @@ internal data class OrbitPluginConfig(
     val id: String,
     val name: String,
     val pluginId: String,
-    val channelId: String
+    val channelId: String,
+    val channelLabel: String = channelId
 )
 
 internal data class OrbitOperation(
@@ -72,12 +73,15 @@ internal class OrbitPluginRepository(private val credentials: DeviceCredentialSt
     fun listPlugins(): List<OrbitPluginConfig> {
         val data = get("/device/orbit-plugins")
         val items = data.optJSONArray("items") ?: throw OrbitApiException("Hub 返回的插件列表结构不受支持")
-        return (0 until items.length()).mapNotNull { index ->
-            val item = items.optJSONObject(index) ?: return@mapNotNull null
-            OrbitPluginConfig(
+        return (0 until items.length()).flatMap { index ->
+            val item = items.optJSONObject(index) ?: throw OrbitApiException("Hub 插件配置格式不正确")
+            val config = OrbitPluginConfig(
                 id = item.optString("id"), name = item.optString("name"),
                 pluginId = item.optString("plugin_id"), channelId = item.optString("channel_id")
-            ).takeIf { it.id.isNotBlank() && it.name.isNotBlank() && it.channelId.isNotBlank() }
+            )
+            if (config.id.isBlank() || config.name.isBlank()) throw OrbitApiException("Hub 插件配置缺少名称或 ID")
+            if (config.channelId.isNotBlank()) listOf(config)
+            else expandOrbitChannels(config, get("/device/orbit-plugins/${pathSegment(config.id)}/capabilities"))
         }
     }
 
@@ -89,6 +93,7 @@ internal class OrbitPluginRepository(private val credentials: DeviceCredentialSt
     fun invoke(config: OrbitPluginConfig, context: OrbitPageContext): JSONObject {
         require(context.configId == config.id && context.channelId == config.channelId) { "分页上下文已过期，请重新加载" }
         val body = JSONObject()
+            .put("channel_id", context.channelId)
             .put("operation", context.operation)
             .put("query", context.query)
             .put("params", JSONObject(context.params))
@@ -152,6 +157,20 @@ internal class OrbitPluginRepository(private val credentials: DeviceCredentialSt
     }
 
     private fun pathSegment(value: String) = java.net.URLEncoder.encode(value, "UTF-8")
+}
+
+internal fun expandOrbitChannels(config: OrbitPluginConfig, data: JSONObject): List<OrbitPluginConfig> {
+    val plugin = data.optJSONObject("plugin") ?: throw OrbitApiException("Hub 返回的能力结构不受支持")
+    if (!plugin.optBoolean("executable", true)) throw OrbitApiException("此 Orbit 插件当前不可执行")
+    val channels = plugin.optJSONArray("channels") ?: throw OrbitApiException("Hub 未返回频道能力")
+    val result = (0 until channels.length()).mapNotNull { index ->
+        val channel = channels.optJSONObject(index) ?: return@mapNotNull null
+        val id = channel.optString("id")
+        if (id.isBlank() || !channel.optBoolean("executable", true)) null
+        else config.copy(channelId = id, channelLabel = channel.optString("label").ifBlank { id })
+    }.distinctBy { it.channelId }
+    if (result.isEmpty()) throw OrbitApiException("此 Orbit 插件没有可用频道")
+    return result
 }
 
 internal fun parseOrbitChannel(data: JSONObject, channelId: String): OrbitChannel {
@@ -229,7 +248,7 @@ internal fun safeMediaUri(raw: String): String? {
 internal fun createOrbitHubRequest(hubBase: String, path: String, deviceToken: String, body: String? = null): OrbitHubRequest {
     val base = hubBase.trim().trimEnd('/')
     require(base.startsWith("https://", ignoreCase = true) || base.startsWith("http://", ignoreCase = true)) { "Hub 地址需以 http:// 或 https:// 开头" }
-    require(path.startsWith("/device/orbit-plugins/")) { "Orbit 设备请求只能发往 Hub 设备接口" }
+    require(path == "/device/orbit-plugins" || path.startsWith("/device/orbit-plugins/")) { "Orbit 设备请求只能发往 Hub 设备接口" }
     val apiBase = if (base.endsWith("/api/v1")) base else "$base/api/v1"
     return OrbitHubRequest("$apiBase$path", "Bearer $deviceToken", body)
 }

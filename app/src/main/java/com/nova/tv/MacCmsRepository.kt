@@ -186,7 +186,7 @@ class MacCmsRepository(context: Context) {
         return cursor.use { rows ->
             buildList {
                 while (rows.moveToNext()) {
-                    runCatching { watchRecordFromJson(JSONObject(rows.getString(0))) }.getOrNull()?.let(::add)
+                    runCatching { watchRecordFromJson(JSONObject(rows.getString(0))) }.getOrNull()?.takeUnless { it.video.id.startsWith("orbit:") }?.let(::add)
                 }
             }
         }

@@ -1887,7 +1887,7 @@ internal fun RemoteVideoDetailScreen(
     hubSyncEngine: HubSyncEngine,
     entryFocusRequester: FocusRequester,
     initial: RemoteVideo,
-    onPlay: (RemoteVideo, PlaybackLine, PlaybackEpisode) -> Unit
+    onPlay: (RemoteVideo, PlaybackLine, PlaybackEpisode, FocusRequester) -> Unit
 ) {
     var detail by remember(initial.id) { mutableStateOf<RemoteVideoDetail?>(null) }
     var loading by remember(initial.id) { mutableStateOf(true) }
@@ -2000,6 +2000,17 @@ internal fun RemoteVideoDetailScreen(
             matchingHistoryEpisode(record, line.episodes)?.let { episode -> line to episode }
         }
     }
+    val episodeRowState = rememberLazyListState()
+    val rememberedEpisodeIndex = watchRecord?.let { record ->
+        selectedLine?.episodes?.let { episodes ->
+            matchingHistoryEpisode(record, episodes)?.let { remembered -> episodes.indexOf(remembered) }
+        }
+    }?.coerceAtLeast(0) ?: 0
+    var episodeEntryIndex by remember(initial.id) { mutableIntStateOf(0) }
+    LaunchedEffect(initial.id, selectedLine, rememberedEpisodeIndex) {
+        episodeEntryIndex = rememberedEpisodeIndex
+        episodeRowState.scrollToItem(rememberedEpisodeIndex)
+    }
     val episodePoster = tmdbDetails?.posterUrl?.takeIf(String::isNotBlank) ?: video.posterUrl
     val heroArtworkUrl = tmdbDetails?.backdropUrl?.takeIf(String::isNotBlank) ?: episodePoster
     var heroArtwork by remember(heroArtworkUrl) { mutableStateOf<LoadedArtwork?>(null) }
@@ -2096,8 +2107,8 @@ internal fun RemoteVideoDetailScreen(
                             modifier = heroActionFocusModifier().focusRequester(entryFocusRequester)
                         ) {
                             val target = continueTarget
-                            if (watchRecord != null && target != null) onPlay(video, target.first, target.second)
-                            else if (firstEpisode != null) onPlay(video, selectedLine, firstEpisode)
+                            if (watchRecord != null && target != null) onPlay(video, target.first, target.second, entryFocusRequester)
+                            else if (firstEpisode != null) onPlay(video, selectedLine, firstEpisode, entryFocusRequester)
                         }
                         TvActionButton(
                             if (favorite) "✓ 已收藏" else "＋ 加入收藏",
@@ -2178,9 +2189,9 @@ internal fun RemoteVideoDetailScreen(
             selectedLine?.let { line ->
                 item {
                     Box(Modifier.fillMaxWidth().padding(start = 108.dp, end = 40.dp)) {
-                        val previewEpisodes = line.episodes.take(6)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 4.dp)) {
-                            itemsIndexed(previewEpisodes, key = { _, episode -> episode.url }) { index, episode ->
+                        LazyRow(state = episodeRowState, horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(bottom = 4.dp)) {
+                            itemsIndexed(line.episodes, key = { _, episode -> episode.url }) { index, episode ->
+                                val episodeFocusRequester = remember(episode.url) { FocusRequester() }
                                 val sourceEpisodeNumber = episodeNumber(episode.title) ?: index + 1
                                 val tmdbEpisode = tmdbSeason?.episodes?.firstOrNull { it.number == sourceEpisodeNumber }
                                 EpisodeArtworkCard(
@@ -2191,13 +2202,15 @@ internal fun RemoteVideoDetailScreen(
                                         ?: tmdbSeason?.posterUrl?.takeIf(String::isNotBlank)
                                         ?: tmdbDetails?.posterUrl?.takeIf(String::isNotBlank)
                                         ?: video.posterUrl,
-                                    modifier = Modifier.width(224.dp).then(
-                                        if (index == 0) {
+                                    modifier = Modifier.width(224.dp)
+                                        .onFocusChanged { if (it.isFocused) episodeEntryIndex = index }
+                                        .focusRequester(episodeFocusRequester).then(
+                                        if (index == episodeEntryIndex) {
                                             Modifier.focusRequester(firstPreviewEpisodeFocusRequester)
                                                 .focusProperties { up = viewAllEpisodesFocusRequester }
                                         } else Modifier
                                     ),
-                                    onClick = { onPlay(video, line, episode) }
+                                    onClick = { onPlay(video, line, episode, episodeFocusRequester) }
                                 )
                             }
                         }
@@ -2268,10 +2281,10 @@ internal fun RemoteVideoDetailScreen(
                                     ?: tmdbSeason?.posterUrl?.takeIf(String::isNotBlank)
                                     ?: tmdbDetails?.posterUrl?.takeIf(String::isNotBlank)
                                     ?: video.posterUrl,
-                                modifier = Modifier.fillMaxWidth().then(
+                                modifier = Modifier.fillMaxWidth().focusRequester(remember(episode.url) { FocusRequester() }).then(
                                     if (index == 0) Modifier.focusRequester(firstAllEpisodeFocusRequester) else Modifier
                                 ),
-                                onClick = { showAllEpisodes = false; onPlay(video, line, episode) }
+                                onClick = { showAllEpisodes = false; onPlay(video, line, episode, viewAllEpisodesFocusRequester) }
                             )
                         }
                     }
@@ -2384,6 +2397,8 @@ fun TvVideoPlayerScreen(
     lineName: String,
     episodes: List<PlaybackEpisode>,
     startPositionMs: Long = 0L,
+    exitOnBack: Boolean = false,
+    onPlaybackError: () -> Unit = {},
     onSelectEpisode: (PlaybackEpisode) -> Unit,
     onExit: () -> Unit,
     onSwitchSource: (RemoteVideo, PlaybackLine, PlaybackEpisode, Long) -> Unit,
@@ -2399,7 +2414,7 @@ fun TvVideoPlayerScreen(
     }
     LaunchedEffect(video.id, episode.url, startPositionMs) {
         withContext(Dispatchers.IO) {
-            repository.saveWatchProgress(video, lineName, episode, startPositionMs, 0L)
+            onProgress(startPositionMs, 0L)
         }
     }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -2415,7 +2430,8 @@ fun TvVideoPlayerScreen(
             startPositionMs = startPositionMs,
             onSelectEpisode = onSelectEpisode,
             onExit = onExit,
-            onError = { playbackError = it },
+            exitOnBack = exitOnBack,
+            onError = { playbackError = it; onPlaybackError() },
             onProgress = onProgress,
             onPause = onPause
         )
@@ -2445,6 +2461,7 @@ private fun PlayerSurface(
     startPositionMs: Long,
     onSelectEpisode: (PlaybackEpisode) -> Unit,
     onExit: () -> Unit,
+    exitOnBack: Boolean,
     onError: (String) -> Unit,
     onProgress: (Long, Long) -> Unit,
     onPause: () -> Unit
@@ -2470,9 +2487,12 @@ private fun PlayerSurface(
     val openPanelCallback = rememberUpdatedState<() -> Unit>({ showEpisodePanel = true })
 
     var controllerVisible by remember { mutableStateOf(false) }
-    BackHandler(enabled = showEpisodePanel || controllerVisible) {
-        showEpisodePanel = false
-        playerView?.hideController()
+    BackHandler(enabled = exitOnBack || showEpisodePanel || controllerVisible) {
+        if (showEpisodePanel) {
+            showEpisodePanel = false
+            playerView?.hideController()
+        } else if (exitOnBack) onExit()
+        else playerView?.hideController()
     }
 
     LaunchedEffect(showEpisodePanel, currentEpisodeIndex) {
@@ -2503,6 +2523,9 @@ private fun PlayerSurface(
         }
         player.addListener(listener)
         onDispose {
+            if (playbackStarted.value && player.duration > 0) {
+                progressCallback(player.currentPosition.coerceAtLeast(0L), player.duration)
+            }
             player.removeListener(listener)
             player.release()
         }
@@ -2809,7 +2832,7 @@ private fun VideoResultCard(
 }
 
 @Composable
-private fun RemoteArtwork(url: String, title: String, modifier: Modifier = Modifier, fallbackUrl: String = "") {
+internal fun RemoteArtwork(url: String, title: String, modifier: Modifier = Modifier, fallbackUrl: String = "") {
     var artwork by remember(url) { mutableStateOf<LoadedArtwork?>(null) }
     LaunchedEffect(url, fallbackUrl) { artwork = loadArtwork(url) ?: loadArtwork(fallbackUrl) }
     Box(modifier.background(Brush.linearGradient(listOf(Color(0xFF334354), Color(0xFF151B27)))), contentAlignment = Alignment.Center) {
