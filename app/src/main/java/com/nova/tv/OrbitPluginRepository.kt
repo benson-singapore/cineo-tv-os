@@ -285,7 +285,14 @@ internal fun paginationContext(
     cursor: String?
 ): OrbitPageContext {
     val accepted = pageOperation.required + pageOperation.optional - "query"
-    val params = (previous.params + channelDefaults + pageOperation.defaults + overrides).filterKeys { it in accepted }
+    val params = (channelDefaults + pageOperation.defaults + previous.params + overrides).filterKeys { it in accepted }.toMutableMap()
+    val pagination = pageOperation.pagination
+    if (cursor == null && pagination?.style == "offset" && pagination.autoIncrement && !pagination.requiresNext && pagination.param.isNotBlank()) {
+        val page = previous.params[pagination.param] ?: pagination.default
+        val number = page.toLongOrNull() ?: throw OrbitApiException("分页页码无效")
+        if (number == Long.MAX_VALUE) throw OrbitApiException("分页页码超出范围")
+        params[pagination.param] = (number + 1).toString()
+    }
     return previous.copy(
         operation = pageOperation.operation,
         scope = pageOperation.scope ?: pageOperation.pagination?.scope,
@@ -308,7 +315,7 @@ internal fun parseOrbitItems(data: JSONObject): OrbitContentPage {
     }
     if (items.length() > 0 && mapped.isEmpty()) throw OrbitApiException("Orbit items 字段与已支持的项目结构不匹配")
     val cursor = data.optJSONObject("next")?.toString()
-    val hasMore = cursor != null && mapped.isNotEmpty() && data.optBoolean("hasMore", true)
+    val hasMore = mapped.isNotEmpty() && data.optBoolean("hasMore", true)
     return OrbitContentPage(mapped, cursor.takeIf { hasMore }, hasMore)
 }
 
@@ -331,3 +338,6 @@ internal fun parseOrbitPlayback(data: JSONObject): OrbitPlayback {
     return OrbitPlayback(item.optString("title").ifBlank { "正在播放" }, uri)
 }
 
+
+internal fun canOffsetPage(operation: OrbitOperation?, hasMore: Boolean): Boolean =
+    hasMore && operation?.pagination?.let { it.style == "offset" && it.autoIncrement && !it.requiresNext && it.param.isNotBlank() } == true

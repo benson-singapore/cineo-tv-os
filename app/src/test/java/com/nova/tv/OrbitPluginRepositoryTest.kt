@@ -120,6 +120,29 @@ class OrbitPluginRepositoryTest {
         }
     }
 
+    @Test fun offsetPagesAdvanceWithoutCursorAndKeepContext() {
+        val op = OrbitOperation("page", "Page", optional = setOf("section"), pagination = OrbitPagination("offset", "page", "1", false, true))
+        val first = OrbitPageContext("config", "channel", "feed", query = "q", params = mapOf("section" to "selected", "page" to "1"), target = mapOf("itemId" to "a"), next = null)
+        val second = paginationContext(first, op, mapOf("section" to "default"), emptyMap(), null)
+        assertEquals("2", second.params["page"])
+        assertEquals("selected", second.params["section"])
+        assertEquals("q", second.query)
+        assertEquals(first.target, second.target)
+        assertEquals("3", paginationContext(second, op, emptyMap(), emptyMap(), null).params["page"])
+        assertTrue(canOffsetPage(op, true))
+        assertFalse(canOffsetPage(op, false))
+        assertFalse(parseOrbitItems(JSONObject("{\"items\":[],\"hasMore\":false}")).hasMore)
+    }
+
+    @Test fun onlyHubDeviceAuthErrorRevokesDevice() {
+        val revoked = assertThrows(OrbitApiException::class.java) { parseHubDataEnvelope(401, "{\"code\":40100}") }
+        assertTrue(revoked.deviceRevoked)
+        val upstream = assertThrows(OrbitApiException::class.java) { parseHubDataEnvelope(502, "{\"code\":50200,\"message\":\"Orbit API Key 失效\"}") }
+        assertFalse(upstream.deviceRevoked)
+        val other = assertThrows(OrbitApiException::class.java) { parseHubDataEnvelope(401, "{\"code\":40101}") }
+        assertFalse(other.deviceRevoked)
+    }
+
     private fun fixture(name: String): String = javaClass.getResourceAsStream("/orbit/$name")!!
         .bufferedReader(Charsets.UTF_8).use { it.readText() }
 
