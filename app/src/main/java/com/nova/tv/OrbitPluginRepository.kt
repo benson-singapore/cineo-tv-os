@@ -10,7 +10,9 @@ internal data class OrbitPluginConfig(
     val name: String,
     val pluginId: String,
     val channelId: String,
-    val channelLabel: String = channelId
+    val channelLabel: String = channelId,
+    val logoUrl: String = "",
+    val description: String = ""
 )
 
 internal data class OrbitOperation(
@@ -75,10 +77,7 @@ internal class OrbitPluginRepository(private val credentials: DeviceCredentialSt
         val items = data.optJSONArray("items") ?: throw OrbitApiException("Hub 返回的插件列表结构不受支持")
         return (0 until items.length()).flatMap { index ->
             val item = items.optJSONObject(index) ?: throw OrbitApiException("Hub 插件配置格式不正确")
-            val config = OrbitPluginConfig(
-                id = item.optString("id"), name = item.optString("name"),
-                pluginId = item.optString("plugin_id"), channelId = item.optString("channel_id")
-            )
+            val config = parseOrbitPluginConfig(item)
             if (config.id.isBlank() || config.name.isBlank()) throw OrbitApiException("Hub 插件配置缺少名称或 ID")
             if (config.channelId.isNotBlank()) listOf(config)
             else expandOrbitChannels(config, get("/device/orbit-plugins/${pathSegment(config.id)}/capabilities"))
@@ -157,6 +156,19 @@ internal class OrbitPluginRepository(private val credentials: DeviceCredentialSt
     }
 
     private fun pathSegment(value: String) = java.net.URLEncoder.encode(value, "UTF-8")
+}
+
+internal fun parseOrbitPluginConfig(item: JSONObject): OrbitPluginConfig = OrbitPluginConfig(
+    id = item.optString("id"), name = item.optString("name"),
+    pluginId = item.optString("plugin_id"), channelId = item.optString("channel_id"),
+    logoUrl = safeOrbitLogoUri(item.opt("logo_url") as? String),
+    description = (item.opt("description") as? String)?.trim().orEmpty()
+)
+
+internal fun safeOrbitLogoUri(raw: String?): String {
+    val uri = runCatching { java.net.URI(raw?.trim().orEmpty()) }.getOrNull() ?: return ""
+    return uri.takeIf { it.scheme.equals("https", ignoreCase = true) && !it.host.isNullOrBlank() &&
+        it.userInfo == null && it.rawQuery == null && it.rawFragment == null }?.toASCIIString().orEmpty()
 }
 
 internal fun expandOrbitChannels(config: OrbitPluginConfig, data: JSONObject): List<OrbitPluginConfig> {
