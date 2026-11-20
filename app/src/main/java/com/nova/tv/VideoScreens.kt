@@ -231,6 +231,7 @@ fun VideoSearchScreen(
 fun VideoCatalogScreen(
     repository: MacCmsRepository,
     section: String,
+    listActive: Boolean,
     entryFocusRequester: FocusRequester,
     menuFocusRequester: FocusRequester,
     onSelect: (RemoteVideo, FocusRequester) -> Unit,
@@ -267,6 +268,17 @@ fun VideoCatalogScreen(
     // loading branch keeps LazyVerticalGrid out of the composition.
     val gridState = key(section, source?.id, selectedCategoryId, reloadKey) {
         rememberLazyGridState()
+    }
+    val topVideoFocus = remember(section, source?.id, selectedCategoryId) { FocusRequester() }
+    var lastFocusedVideoId by remember(section, source?.id, selectedCategoryId) { mutableStateOf<String?>(null) }
+    val listScope = rememberCoroutineScope()
+    BackHandler(enabled = listActive && !showPreviewConfig && videos.isNotEmpty() &&
+        (gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0)) {
+        listScope.launch {
+            gridState.scrollToItem(0)
+            withFrameNanos { }
+            runCatching { topVideoFocus.requestFocus() }
+        }
     }
     val title = when (section) {
         "首页" -> "精选内容"
@@ -376,7 +388,7 @@ fun VideoCatalogScreen(
         if (section != "首页" && categories.isNotEmpty()) {
             Spacer(Modifier.height(17.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                item { TvActionButton("全部", selected = selectedCategoryId == null) { selectedCategoryId = null } }
+                item { TvActionButton("全部", selected = selectedCategoryId == null, modifier = Modifier.focusProperties { left = menuFocusRequester }) { selectedCategoryId = null } }
                 items(categories, key = { it.id }) { category ->
                     TvActionButton(category.name, selected = selectedCategoryId == category.id) {
                         selectedCategoryId = category.id
@@ -411,7 +423,10 @@ fun VideoCatalogScreen(
                 Text("暂无内容", color = ScreenMuted, fontSize = 15.sp)
             }
             else -> {
-                Text("${videos.size} 部 · 来自 ${source.name}", color = AccentGold, fontSize = 11.sp)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text("${videos.size} 部 · 来自 ${source.name}", color = AccentGold, fontSize = 11.sp)
+                    if (loadingMore) Text("⟳ 正在加载下一页…", color = Color.White, fontSize = 12.sp)
+                }
                 Spacer(Modifier.height(10.dp))
                 LazyVerticalGrid(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -422,13 +437,18 @@ fun VideoCatalogScreen(
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     itemsIndexed(videos, key = { _, video -> video.id }) { index, video ->
-                        val fallbackFocusRequester = remember(video.id) { FocusRequester() }
-                        val videoFocusRequester = if (index == 0) entryFocusRequester else fallbackFocusRequester
+                        val videoFocusRequester = remember(video.id) { FocusRequester() }
+                        val lastIsVisible = gridState.layoutInfo.visibleItemsInfo.any { it.key == lastFocusedVideoId }
+                        val isEntry = if (lastIsVisible) video.id == lastFocusedVideoId else index == gridState.firstVisibleItemIndex
                         VideoResultCard(
                             video = video,
                             onClick = { onSelect(video, videoFocusRequester) },
                             posterAspectRatio = posterRatio,
-                            modifier = Modifier.focusRequester(videoFocusRequester)
+                            modifier = Modifier
+                                .then(if (isEntry) Modifier.focusRequester(entryFocusRequester) else Modifier)
+                                .then(if (index == 0) Modifier.focusRequester(topVideoFocus) else Modifier)
+                                .focusRequester(videoFocusRequester)
+                                .onFocusChanged { if (it.isFocused) lastFocusedVideoId = video.id }
                                 .focusProperties {
                                     if (index % columns == 0) left = menuFocusRequester
                                 }
@@ -994,6 +1014,7 @@ internal fun SettingsScreen(
     hubSyncEngine: HubSyncEngine,
     menuSettings: NavigationMenuSettings,
     entryFocusRequester: FocusRequester,
+    menuFocusRequester: FocusRequester,
     onMenuSettingsChange: (NavigationMenuSettings) -> Unit
 ) {
     val context = LocalContext.current
@@ -1032,7 +1053,7 @@ internal fun SettingsScreen(
         Modifier.fillMaxSize().padding(start = 108.dp, end = 40.dp, top = 26.dp, bottom = 24.dp),
         horizontalArrangement = Arrangement.spacedBy(24.dp)
     ) {
-        Column(Modifier.width(225.dp).fillMaxHeight()) {
+        Column(Modifier.width(225.dp).fillMaxHeight().focusProperties { left = menuFocusRequester }) {
             Text("配置", color = Color.White, fontSize = 31.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
             Text("设置分类", color = ScreenMuted, fontSize = 13.sp)
@@ -1040,8 +1061,8 @@ internal fun SettingsScreen(
             SettingsMenuItem(
                 "视频源",
                 selected = selectedSetting == "视频源",
-                modifier = Modifier.focusRequester(entryFocusRequester)
-                    .then(if (selectedSetting == "视频源") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                modifier = Modifier
+                    .then(if (selectedSetting == "视频源") Modifier.focusRequester(entryFocusRequester).focusRequester(selectedSettingFocusRequester) else Modifier)
                     .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "视频源"
@@ -1051,7 +1072,7 @@ internal fun SettingsScreen(
                 "TMDB 数据",
                 selected = selectedSetting == "TMDB 数据",
                 modifier = Modifier
-                    .then(if (selectedSetting == "TMDB 数据") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .then(if (selectedSetting == "TMDB 数据") Modifier.focusRequester(entryFocusRequester).focusRequester(selectedSettingFocusRequester) else Modifier)
                     .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "TMDB 数据"
@@ -1061,7 +1082,7 @@ internal fun SettingsScreen(
                 "云端同步",
                 selected = selectedSetting == "云端同步",
                 modifier = Modifier
-                    .then(if (selectedSetting == "云端同步") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .then(if (selectedSetting == "云端同步") Modifier.focusRequester(entryFocusRequester).focusRequester(selectedSettingFocusRequester) else Modifier)
                     .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "云端同步"
@@ -1071,7 +1092,7 @@ internal fun SettingsScreen(
                 "菜单配置",
                 selected = selectedSetting == "菜单配置",
                 modifier = Modifier
-                    .then(if (selectedSetting == "菜单配置") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .then(if (selectedSetting == "菜单配置") Modifier.focusRequester(entryFocusRequester).focusRequester(selectedSettingFocusRequester) else Modifier)
                     .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "菜单配置"
@@ -1081,7 +1102,7 @@ internal fun SettingsScreen(
                 "版本更新",
                 selected = selectedSetting == "版本更新",
                 modifier = Modifier
-                    .then(if (selectedSetting == "版本更新") Modifier.focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .then(if (selectedSetting == "版本更新") Modifier.focusRequester(entryFocusRequester).focusRequester(selectedSettingFocusRequester) else Modifier)
                     .focusProperties { right = detailEntryFocusRequester }
             ) {
                 selectedSetting = "版本更新"
@@ -2391,13 +2412,16 @@ private fun TmdbPeopleSection(title: String, people: List<TmdbPerson>) {
 }
 
 @Composable
-fun TvVideoPlayerScreen(
+internal fun TvVideoPlayerScreen(
     repository: MacCmsRepository,
     video: RemoteVideo,
     episode: PlaybackEpisode,
     videoTitle: String,
     lineName: String,
     episodes: List<PlaybackEpisode>,
+    orbitSelection: OrbitWatchSelection?,
+    orbitNextResolver: (suspend (OrbitWatchSelection) -> PreparedPlaybackNext?)?,
+    onAutoNext: (PreparedPlaybackNext) -> Unit,
     startPositionMs: Long = 0L,
     exitOnBack: Boolean = false,
     onPlaybackError: () -> Unit = {},
@@ -2415,9 +2439,7 @@ fun TvVideoPlayerScreen(
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
     LaunchedEffect(video.id, episode.url, startPositionMs) {
-        withContext(Dispatchers.IO) {
-            onProgress(startPositionMs, 0L)
-        }
+        onProgress(startPositionMs, 0L)
     }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         PlayerSurface(
@@ -2429,6 +2451,9 @@ fun TvVideoPlayerScreen(
             url = episode.url,
             episode = episode,
             episodes = episodes,
+            orbitSelection = orbitSelection,
+            orbitNextResolver = orbitNextResolver,
+            onAutoNext = onAutoNext,
             startPositionMs = startPositionMs,
             onSelectEpisode = onSelectEpisode,
             onExit = onExit,
@@ -2460,6 +2485,9 @@ private fun PlayerSurface(
     url: String,
     episode: PlaybackEpisode,
     episodes: List<PlaybackEpisode>,
+    orbitSelection: OrbitWatchSelection?,
+    orbitNextResolver: (suspend (OrbitWatchSelection) -> PreparedPlaybackNext?)?,
+    onAutoNext: (PreparedPlaybackNext) -> Unit,
     startPositionMs: Long,
     onSelectEpisode: (PlaybackEpisode) -> Unit,
     onExit: () -> Unit,
@@ -2469,7 +2497,15 @@ private fun PlayerSurface(
     onPause: () -> Unit
 ) {
     val context = LocalContext.current
-    val player = remember { ExoPlayer.Builder(context).build() }
+    val playbackId = orbitPlaybackIdentity(orbitSelection, url)
+    val player = remember { ExoPlayer.Builder(context).build().apply {
+        preloadConfiguration = ExoPlayer.PreloadConfiguration(5_000_000L)
+    } }
+    var queuedNext by remember(player) { mutableStateOf<PreparedPlaybackNext?>(null) }
+    var lastKnownDuration by remember(player) { mutableLongStateOf(0L) }
+    val autoNextCallback by rememberUpdatedState(onAutoNext)
+    val currentOrbitSelection by rememberUpdatedState(orbitSelection)
+    val currentOrbitResolver by rememberUpdatedState(orbitNextResolver)
     val errorCallback by rememberUpdatedState(onError)
     val progressCallback by rememberUpdatedState(onProgress)
     val pauseCallback by rememberUpdatedState(onPause)
@@ -2513,6 +2549,24 @@ private fun PlayerSurface(
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
+            override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                val next = queuedNext ?: return
+                if (newPosition.mediaItem?.mediaId == orbitPlaybackIdentity(next.orbitSelection, next.episode.url) && lastKnownDuration > 0) {
+                    progressCallback(oldPosition.positionMs.coerceAtLeast(0L), lastKnownDuration)
+                }
+            }
+            override fun onMediaItemTransition(mediaItem: PlayerMediaItem?, reason: Int) {
+                val next = queuedNext ?: return
+                if (mediaItem?.mediaId != orbitPlaybackIdentity(next.orbitSelection, next.episode.url)) return
+                queuedNext = null
+                lastKnownDuration = 0L
+                autoNextCallback(next)
+            }
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED && player.duration > 0) {
+                    progressCallback(player.duration, player.duration)
+                }
+            }
             override fun onPlayerError(error: PlaybackException) {
                 errorCallback(error.localizedMessage ?: "播放器无法读取此地址")
             }
@@ -2532,20 +2586,64 @@ private fun PlayerSurface(
             player.release()
         }
     }
-    LaunchedEffect(player, url, startPositionMs) {
-        val mediaBuilder = PlayerMediaItem.Builder().setUri(url)
-        if (url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)) mediaBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-        player.setMediaItem(mediaBuilder.build(), startPositionMs.coerceAtLeast(0L))
-        player.prepare()
-        player.playWhenReady = true
+    LaunchedEffect(player, playbackId, startPositionMs) {
+        if (player.currentMediaItem?.mediaId != playbackId) {
+            queuedNext = null
+            lastKnownDuration = 0L
+            player.setMediaItem(playbackMediaItem(url, playbackId), startPositionMs.coerceAtLeast(0L))
+            player.prepare()
+            player.playWhenReady = true
+        }
     }
-    LaunchedEffect(player, url) {
+    LaunchedEffect(player, playbackId, episodes) {
+        var attemptedBeforeEnd = false
+        var attemptedAtEnd = false
+        while (true) {
+            delay(1_000)
+            if (player.currentMediaItem?.mediaId != playbackId) continue
+            val duration = player.duration
+            if (duration > 0) lastKnownDuration = duration
+            val ended = player.playbackState == Player.STATE_ENDED
+            val nearEnd = shouldPreloadNext(duration, player.currentPosition)
+            if (queuedNext != null || (!nearEnd && !ended)) continue
+            if (ended && attemptedAtEnd || !ended && attemptedBeforeEnd) continue
+            if (ended) attemptedAtEnd = true else attemptedBeforeEnd = true
+            val next = try {
+                val selection = currentOrbitSelection
+                if (selection != null) currentOrbitResolver?.invoke(selection)
+                else nextPlaybackEpisode(episodes, url)?.let { PreparedPlaybackNext(it) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (unknown: OrbitNextUnknown) {
+                if (ended) errorCallback(unknown.message ?: "无法确认下一集")
+                null
+            } catch (_: Exception) {
+                if (ended) errorCallback("下一集加载失败，请返回选集重试")
+                null
+            }
+            if (next != null && orbitPlaybackIdentity(next.orbitSelection, next.episode.url) != playbackId && player.currentMediaItem?.mediaId == playbackId) {
+                try {
+                    queuedNext = next
+                    player.addMediaItem(playbackMediaItem(next.episode.url, orbitPlaybackIdentity(next.orbitSelection, next.episode.url)))
+                    if (player.playbackState == Player.STATE_ENDED) {
+                        player.seekToNextMediaItem()
+                        player.prepare()
+                        player.playWhenReady = true
+                    }
+                } catch (_: Exception) {
+                    queuedNext = null
+                    if (ended) errorCallback("下一集加载失败，请返回选集重试")
+                }
+            }
+        }
+    }
+    LaunchedEffect(player, playbackId) {
         while (true) {
             delay(5_000)
             val duration = player.duration
             if (duration > 0) {
                 val position = player.currentPosition.coerceAtLeast(0L)
-                withContext(Dispatchers.IO) { progressCallback(position, duration) }
+                progressCallback(position, duration)
             }
         }
     }
@@ -2562,6 +2660,7 @@ private fun PlayerSurface(
             val target = line.episodes.firstOrNull { episodeNumber(it.title) == number }
                 ?: line.episodes[number - 1]
             val position = player.currentPosition.coerceAtLeast(0L)
+            if (player.duration > 0) progressCallback(position, player.duration)
             showSourceSearch = false
             showEpisodePanel = false
             onSwitchSource(resolved.video, line, target, position)
@@ -2641,7 +2740,10 @@ private fun PlayerSurface(
                             modifier = Modifier.width(64.dp)
                                 .then(if (index == currentEpisodeIndex) Modifier.focusRequester(currentEpisodeFocusRequester) else Modifier)
                                 .focusProperties { down = selectedSpeedFocusRequester },
-                            onClick = { selectEpisodeCallback(item) }
+                            onClick = {
+                                if (player.duration > 0) progressCallback(player.currentPosition.coerceAtLeast(0L), player.duration)
+                                selectEpisodeCallback(item)
+                            }
                         )
                     }
                 }
@@ -2694,6 +2796,20 @@ private fun PlayerSurface(
             }
         }
     }
+}
+
+internal fun shouldPreloadNext(durationMs: Long, positionMs: Long): Boolean =
+    durationMs > 0 && durationMs - positionMs.coerceAtLeast(0L) <= 60_000L
+
+internal fun nextPlaybackEpisode(episodes: List<PlaybackEpisode>, currentUrl: String): PlaybackEpisode? {
+    val index = episodes.indexOfFirst { it.url == currentUrl }
+    return if (index >= 0) episodes.getOrNull(index + 1) else null
+}
+
+private fun playbackMediaItem(url: String, mediaId: String = url): PlayerMediaItem {
+    val builder = PlayerMediaItem.Builder().setMediaId(mediaId).setUri(url)
+    if (url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)) builder.setMimeType(MimeTypes.APPLICATION_M3U8)
+    return builder.build()
 }
 
 @UnstableApi
@@ -2834,12 +2950,13 @@ private fun VideoResultCard(
 }
 
 @Composable
-internal fun RemoteArtwork(url: String, title: String, modifier: Modifier = Modifier, fallbackUrl: String = "") {
+internal fun RemoteArtwork(url: String, title: String, modifier: Modifier = Modifier, fallbackUrl: String = "",
+    fallbackTextSize: androidx.compose.ui.unit.TextUnit = 44.sp, contentScale: ContentScale = ContentScale.Crop) {
     var artwork by remember(url) { mutableStateOf<LoadedArtwork?>(null) }
     LaunchedEffect(url, fallbackUrl) { artwork = loadArtwork(url) ?: loadArtwork(fallbackUrl) }
     Box(modifier.background(Brush.linearGradient(listOf(Color(0xFF334354), Color(0xFF151B27)))), contentAlignment = Alignment.Center) {
-        if (artwork != null) Image(artwork!!.image, contentDescription = title, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-        else Text(title.take(1), color = Color.White.copy(alpha = .72f), fontSize = 44.sp, fontWeight = FontWeight.Bold)
+        if (artwork != null) Image(artwork!!.image, contentDescription = title, modifier = Modifier.fillMaxSize(), contentScale = contentScale)
+        else Text(title.trim().take(1), color = Color.White.copy(alpha = .72f), fontSize = fallbackTextSize, fontWeight = FontWeight.Bold)
     }
 }
 

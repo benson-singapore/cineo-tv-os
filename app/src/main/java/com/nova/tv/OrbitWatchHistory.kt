@@ -1,6 +1,9 @@
 package com.nova.tv
 
 import android.content.Context
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -11,6 +14,8 @@ internal data class OrbitWatchSelection(
     val episode: OrbitEpisodeItem,
 )
 
+internal data class PreparedPlaybackNext(val episode: PlaybackEpisode, val orbitSelection: OrbitWatchSelection? = null)
+
 internal data class OrbitWatchEntry(
     val selection: OrbitWatchSelection,
     val positionMs: Long,
@@ -18,10 +23,15 @@ internal data class OrbitWatchEntry(
     val updatedAt: Long,
 )
 
+internal fun orbitWatchComplete(position: Long, duration: Long): Boolean =
+    duration > 0 && position >= maxOf(duration - 10_000L, duration * 9 / 10)
+
 /** Local only; kept separate from the normal library and Hub sync database. */
 internal class OrbitWatchHistory(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("orbit_watch_history", Context.MODE_PRIVATE)
     private val lock = Any()
+    var revision by mutableIntStateOf(0)
+        private set
 
     fun entries(configId: String): List<OrbitWatchEntry> = synchronized(lock) {
         val array = runCatching { JSONArray(prefs.getString(configId, "[]")) }.getOrElse { JSONArray() }
@@ -57,5 +67,6 @@ internal class OrbitWatchHistory(context: Context) {
                 .put("position", entry.positionMs).put("duration", entry.durationMs).put("updatedAt", entry.updatedAt))
         }
         prefs.edit().putString(selection.configId, array.toString()).apply()
+        revision++
     }
 }

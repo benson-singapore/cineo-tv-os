@@ -56,19 +56,27 @@ import androidx.tv.material3.Text
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 
 private val OrbitInk = Color(0xFF090D13)
 private val OrbitMuted = Color(0xFFB5C0CC)
 private val OrbitGold = Color(0xFFE9B44C)
 
+internal fun orbitPageProgressed(oldCount: Int, newCount: Int, previousCursor: String?, nextCursor: String?): Boolean =
+    newCount > oldCount && (previousCursor == null || nextCursor != previousCursor)
+
+internal fun shouldLoadOrbitPage(lastVisible: Int, itemCount: Int, columns: Int): Boolean =
+    itemCount > 0 && lastVisible >= (itemCount - columns).coerceAtLeast(0)
+
 @Composable
 internal fun OrbitPluginScreen(
     repository: OrbitPluginRepository,
+    listActive: Boolean,
     entryFocusRequester: FocusRequester,
     menuFocusRequester: FocusRequester,
     history: OrbitWatchHistory,
-    onPlay: (RemoteVideo, PlaybackLine, PlaybackEpisode, FocusRequester, OrbitWatchSelection, Long, () -> Unit) -> Unit
+    onPlay: (RemoteVideo, PlaybackLine, PlaybackEpisode, FocusRequester, OrbitWatchSelection, Long, () -> Unit, suspend (OrbitWatchSelection) -> PreparedPlaybackNext?) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -91,22 +99,26 @@ internal fun OrbitPluginScreen(
     var historyRevision by remember { mutableIntStateOf(0) }
     var historyOrigin by remember { mutableStateOf(false) }
     var pendingHistoryEntry by remember { mutableStateOf<OrbitWatchEntry?>(null) }
-    var resumeEntry by remember { mutableStateOf<OrbitWatchEntry?>(null) }
     val historyFocus = remember { FocusRequester() }
     val pickerFocus = remember { FocusRequester() }
     val historyFirstFocus = remember { FocusRequester() }
     var plugins by remember { mutableStateOf(emptyList<OrbitPluginConfig>()) }
     val channelFocus = remember(plugins) { plugins.associate { "${it.id}:${it.channelId}" to FocusRequester() } }
     val firstPosterFocus = remember { FocusRequester() }
+    val topPosterFocus = remember { FocusRequester() }
     val refreshFocus = remember { FocusRequester() }
     var selected by remember { mutableStateOf<OrbitPluginConfig?>(null) }
     var channel by remember { mutableStateOf<OrbitChannel?>(null) }
     var content by remember { mutableStateOf(emptyList<OrbitVideoItem>()) }
     val gridState = rememberLazyGridState()
-    val posterFocus = remember(content) { content.associate { it.id to FocusRequester() } }
+    val posterFocus = remember(selected?.id, selected?.channelId) { mutableMapOf<String, FocusRequester>() }
+    var lastFocusedPosterId by remember(selected?.id, selected?.channelId) { mutableStateOf<String?>(null) }
     var returnFocusId by remember { mutableStateOf<String?>(null) }
     var restoreListFocus by remember { mutableStateOf(false) }
     var next by remember { mutableStateOf<String?>(null) }
+    var listHasMore by remember { mutableStateOf(false) }
+    var chaptersHasMore by remember { mutableStateOf(false) }
+    var chaptersEndState by remember { mutableStateOf<Boolean?>(null) }
     var chapters by remember { mutableStateOf(emptyList<OrbitEpisodeItem>()) }
     var chaptersNext by remember { mutableStateOf<String?>(null) }
     var selectedVideo by remember { mutableStateOf<OrbitVideoItem?>(null) }
@@ -117,6 +129,7 @@ internal fun OrbitPluginScreen(
     val playbackCache = remember { mutableMapOf<String, Pair<Long, OrbitPlayback>>() }
     val chapterCache = remember { mutableMapOf<String, Triple<List<OrbitEpisodeItem>, String?, OrbitPageContext>>() }
     var loadingMore by remember { mutableStateOf(false) }
+    var pageLoadFailed by remember { mutableStateOf(false) }
     var detailLoading by remember { mutableStateOf(false) }
     var detailFocusPending by remember { mutableStateOf(false) }
     val detailPlayFocus = remember { FocusRequester() }
@@ -192,14 +205,14 @@ internal fun OrbitPluginScreen(
             return
         }
         val generation = ++requestGeneration
-        loading = true; loadingMore = false; actionError = null; content = emptyList(); next = null; selectedTag = null
+        loading = true; loadingMore = false; pageLoadFailed = false; actionError = null; content = emptyList(); next = null; selectedTag = null
         val context = baseContext(config, feedOperation, searchText)
         listContext = context
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) { repository.listItems(repository.invoke(config, context)) }
                 if (generation == requestGeneration && selected?.id == config.id && selected?.channelId == config.channelId) {
-                    content = result.items; next = result.next; listContext = context.copy(next = result.next)
+                    content = result.items; next = result.next; listHasMore = result.hasMore; listContext = context.copy(next = result.next)
                     if (result.items.isEmpty()) actionError = "此列表目前没有内容"
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
@@ -212,7 +225,7 @@ internal fun OrbitPluginScreen(
         val config = selected ?: return@LaunchedEffect
         val generation = ++requestGeneration
         channel = null; content = emptyList(); chapters = emptyList(); selectedVideo = null
-        next = null; activeQuery = ""; query = ""; actionError = null; loadingMore = false
+        next = null; activeQuery = ""; query = ""; actionError = null; loadingMore = false; pageLoadFailed = false
         appliedFilters = emptyMap()
         loading = true
         try {
@@ -234,9 +247,10 @@ internal fun OrbitPluginScreen(
         val config = selected ?: return
         val currentChannel = channel ?: return
         val previous = listContext ?: return
-        val pageOp = currentChannel.operations.firstOrNull { it.operation == "page" && it.executable }
-        if (loading || loadingMore || next == null) return
+        val pageOp = currentChannel.operations.firstOrNull { it.operation == "page" && it.executable && it.scope == null && it.pagination?.scope == null }
+        if (loading || loadingMore) return
         if (pageOp == null) { actionError = "此频道没有声明列表分页能力"; return }
+        if (next == null && !canOffsetPage(pageOp, listHasMore)) return
         val context = paginationContext(previous, pageOp, currentChannel.defaults, appliedFilters, next)
         loadingMore = true; actionError = null
         val generation = requestGeneration
@@ -244,12 +258,15 @@ internal fun OrbitPluginScreen(
             try {
                 val page = withContext(Dispatchers.IO) { repository.listItems(repository.invoke(config, context)) }
                 if (generation == requestGeneration && selected?.id == config.id && listContext?.next == previous.next) {
-                    content = (content + page.items).distinctBy { it.id }
-                    next = page.next
+                    val combined = (content + page.items).distinctBy { it.id }
+                    val progressed = orbitPageProgressed(content.size, combined.size, previous.next, page.next)
+                    content = combined
+                    next = page.next.takeIf { progressed }; listHasMore = page.hasMore && progressed
+                    pageLoadFailed = false
                     listContext = context.copy(next = page.next)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { if (generation == requestGeneration) actionError = failure.message ?: "加载下一页失败" }
+            catch (failure: Exception) { if (generation == requestGeneration) { pageLoadFailed = true; actionError = failure.message ?: "加载下一页失败" } }
             finally { if (generation == requestGeneration) loadingMore = false }
         }
     }
@@ -259,16 +276,16 @@ internal fun OrbitPluginScreen(
         val config = selected ?: return
         val op = channel?.operations?.firstOrNull { it.operation == "chapters" && it.executable }
         if (op == null) { actionError = "此频道未声明选集能力"; return }
-        val targetKey = op.targets.keys.firstOrNull() ?: run { actionError = "章节能力缺少 target 声明"; return }
+        val targetKey = op.targets.keys.firstOrNull { it == "itemId" } ?: run { actionError = "章节能力缺少 target 声明"; return }
         val context = baseContext(config, op, activeQuery, mapOf(targetKey to item.id))
         val cacheKey = "${config.id}:${config.channelId}:${item.id}"
-        val cached = chapterCache[cacheKey]
+        val cached = chapterCache[cacheKey]?.takeIf { it.second != null }
         returnFocusId = item.id
         selectedVideo = item; selectedEpisode = null; chapters = emptyList(); chaptersNext = null; chapterContext = context
         actionError = null; detailFocusPending = true; loadingMore = false
         if (cached != null) {
             ++requestGeneration
-            chapters = cached.first; chaptersNext = cached.second; chapterContext = cached.third
+            chapters = cached.first; chaptersNext = cached.second; chaptersHasMore = true; chaptersEndState = true; chapterContext = cached.third
             loading = false; detailLoading = false
             return
         }
@@ -280,7 +297,9 @@ internal fun OrbitPluginScreen(
                 val result = repository.listEpisodes(raw)
                 if (generation == requestGeneration && selectedVideo?.id == item.id) {
                     chapters = result
-                    chaptersNext = raw.optJSONObject("next")?.toString().takeIf { raw.optBoolean("hasMore", true) }
+                    chaptersEndState = raw.opt("hasMore") as? Boolean
+                    chaptersHasMore = chaptersEndState != false
+                    chaptersNext = raw.optJSONObject("next")?.toString().takeIf { chaptersHasMore }
                     chapterContext = context.copy(next = chaptersNext)
                     chapterCache[cacheKey] = Triple(chapters, chaptersNext, chapterContext!!)
                 }
@@ -295,7 +314,6 @@ internal fun OrbitPluginScreen(
         if (!loading && channel?.id == entry.selection.channelId) {
             pendingHistoryEntry = null
             historyOrigin = true
-            resumeEntry = entry
             openVideo(entry.selection.video)
         }
     }
@@ -303,12 +321,12 @@ internal fun OrbitPluginScreen(
     fun loadMoreChapters() {
         val config = selected ?: return
         val previous = chapterContext ?: return
-        val cursor = chaptersNext ?: return
+        val cursor = chaptersNext
         val currentChannel = channel ?: return
         val pageOp = currentChannel.operations.firstOrNull { it.operation == "page" && it.executable &&
             (it.scope == "chapters" || it.pagination?.scope == "chapters") }
         if (pageOp == null) { actionError = "此频道未声明章节分页能力"; return }
-        if (loading || loadingMore) return
+        if (loading || loadingMore || (cursor == null && !canOffsetPage(pageOp, chaptersHasMore))) return
         val context = paginationContext(previous, pageOp, currentChannel.defaults, appliedFilters, cursor)
         loadingMore = true
         val generation = requestGeneration
@@ -318,7 +336,9 @@ internal fun OrbitPluginScreen(
                 val page = repository.listEpisodes(raw)
                 if (generation == requestGeneration && selectedVideo?.id == previous.target.values.firstOrNull()) {
                     chapters = (chapters + page).distinctBy { it.id }
-                    chaptersNext = raw.optJSONObject("next")?.toString().takeIf { raw.optBoolean("hasMore", true) }
+                    chaptersEndState = raw.opt("hasMore") as? Boolean
+                    chaptersHasMore = chaptersEndState != false
+                    chaptersNext = raw.optJSONObject("next")?.toString().takeIf { chaptersHasMore }
                     chapterContext = context.copy(next = chaptersNext)
                     chapterCache["${config.id}:${config.channelId}:${selectedVideo?.id}"] = Triple(chapters, chaptersNext, chapterContext!!)
                 }
@@ -334,8 +354,8 @@ internal fun OrbitPluginScreen(
         val video = selectedVideo ?: return
         val op = channel?.operations?.firstOrNull { it.operation == "chapterDetail" && it.executable }
         if (op == null) { actionError = "此频道未声明章节播放信息能力"; return }
-        val parentKey = op.targets.keys.firstOrNull() ?: "itemId"
-        val chapterKey = op.targets.keys.firstOrNull { it != parentKey } ?: run { actionError = "章节详情缺少章节 target 声明"; return }
+        val parentKey = op.targets.keys.firstOrNull { it == "itemId" } ?: run { actionError = "章节详情缺少作品 target 声明"; return }
+        val chapterKey = op.targets.keys.firstOrNull { it == "chapterId" } ?: run { actionError = "章节详情缺少章节 target 声明"; return }
         val context = baseContext(config, op, activeQuery, mapOf(parentKey to video.id, chapterKey to episode.id))
         selectedEpisode = episode
         loading = true; playbackLoading = true; playbackLoadingFocus = returnFocus; actionError = null
@@ -351,8 +371,28 @@ internal fun OrbitPluginScreen(
                     val record = history.entries(config.id).firstOrNull {
                         it.selection.channelId == config.channelId && it.selection.video.id == video.id && it.selection.episode.id == episode.id
                     }
-                    val position = record?.let { if (it.durationMs > 0 && it.positionMs >= it.durationMs - 10_000) 0L else it.positionMs } ?: 0L
-                    onPlay(remoteVideo(video, config), PlaybackLine("Orbit", listOf(PlaybackEpisode(playback.title.ifBlank { episode.title }, playback.url))), PlaybackEpisode(playback.title.ifBlank { episode.title }, playback.url), returnFocus, OrbitWatchSelection(config.id, config.channelId, video, episode), position) { playbackCache.remove(cacheKey) }
+                    val position = record?.let { if (orbitWatchComplete(it.positionMs, it.durationMs)) 0L else it.positionMs } ?: 0L
+                    val channelSnapshot = channel
+                    val chapterPageOp = channelSnapshot?.operations?.firstOrNull { it.operation == "page" && it.executable &&
+                        (it.scope == "chapters" || it.pagination?.scope == "chapters") }
+                    val discovery = OrbitNextDiscovery(chapters.toList(), chapterContext, chaptersNext, chaptersEndState,
+                        chapterPageOp, channelSnapshot?.defaults.orEmpty(), appliedFilters.toMap()) { request ->
+                        withContext(Dispatchers.IO) {
+                            val raw = repository.invoke(config, request)
+                            OrbitChapterPage(repository.listEpisodes(raw), raw.optJSONObject("next")?.toString(),
+                                raw.opt("hasMore") as? Boolean)
+                        }
+                    }
+                    val nextBaseContext = baseContext(config, op, activeQuery)
+                    val resolver: suspend (OrbitWatchSelection) -> PreparedPlaybackNext? = { current ->
+                        val nextEpisode = discovery.next(current.episode.id)
+                        if (nextEpisode == null) null else {
+                            val nextContext = nextBaseContext.copy(target = mapOf(parentKey to video.id, chapterKey to nextEpisode.id))
+                            val resolved = withContext(Dispatchers.IO) { repository.playback(repository.invoke(config, nextContext)) }
+                            PreparedPlaybackNext(PlaybackEpisode(resolved.title.ifBlank { nextEpisode.title }, resolved.url), current.copy(episode = nextEpisode))
+                        }
+                    }
+                    onPlay(remoteVideo(video, config), PlaybackLine("Orbit", listOf(PlaybackEpisode(playback.title.ifBlank { episode.title }, playback.url))), PlaybackEpisode(playback.title.ifBlank { episode.title }, playback.url), returnFocus, OrbitWatchSelection(config.id, config.channelId, video, episode), position, { playbackCache.remove(cacheKey) }, resolver)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { if (generation == requestGeneration) actionError = failure.message ?: "无法播放此章节" }
@@ -410,6 +450,14 @@ internal fun OrbitPluginScreen(
             if (!runCatching { historyFirstFocus.requestFocus() }.getOrDefault(false)) runCatching { historyFocus.requestFocus() }
         }
     }
+    BackHandler(enabled = listActive && selectedVideo == null && !showHistory && !showPreviewConfig && !showPluginPicker &&
+        content.isNotEmpty() && (gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0)) {
+        scope.launch {
+            gridState.scrollToItem(0)
+            withFrameNanos { }
+            runCatching { topPosterFocus.requestFocus() }
+        }
+    }
     BackHandler(enabled = selectedVideo != null) { returnToList() }
     BackHandler(enabled = showHistory && selectedVideo == null) {
         showHistory = false
@@ -461,7 +509,7 @@ internal fun OrbitPluginScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 item { Text("切换插件", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold) }
                 itemsIndexed(plugins.distinctBy { it.id }) { index, config ->
-                    OrbitAction(config.name, selected = config.id == selected?.id,
+                    OrbitPluginPickerItem(config, selected = config.id == selected?.id,
                         modifier = Modifier.fillMaxWidth().then(if (index == 0) Modifier.focusRequester(pickerEntry) else Modifier)) {
                         showPluginPicker = false
                         showHistory = false
@@ -530,6 +578,7 @@ internal fun OrbitPluginScreen(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    selected?.let { OrbitPluginLogo(it, Modifier.size(38.dp), 18.sp) }
                     Text(selected?.name ?: "Orbit 插件", modifier = Modifier.weight(1f, fill = false), color = Color.White,
                         fontSize = 30.sp, fontWeight = FontWeight.Bold, maxLines = 1,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
@@ -555,11 +604,11 @@ internal fun OrbitPluginScreen(
         Spacer(Modifier.height(18.dp))
         if (plugins.isNotEmpty()) {
             LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(plugins.filter { it.id == selected?.id }, key = { "${it.id}:${it.channelId}" }) { config ->
+                itemsIndexed(plugins.filter { it.id == selected?.id }, key = { _, it -> "${it.id}:${it.channelId}" }) { index, config ->
                     OrbitAction(config.channelLabel, modifier = Modifier
                         .focusRequester(channelFocus.getValue("${config.id}:${config.channelId}"))
                         .focusProperties {
-                            left = menuFocusRequester
+                            if (index == 0) left = menuFocusRequester
                             up = refreshFocus
                             if (content.isNotEmpty() && selectedVideo == null) down = firstPosterFocus
                         }, selected = config.id == selected?.id && config.channelId == selected?.channelId) {
@@ -590,6 +639,9 @@ internal fun OrbitPluginScreen(
             }
             selectedVideo != null -> {
                 val video = selectedVideo!!
+                val record = remember(selected?.id, selected?.channelId, video.id, history.revision) {
+                    selected?.let { config -> history.entries(config.id).firstOrNull { it.selection.channelId == config.channelId && it.selection.video.id == video.id } }
+                }
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(22.dp)) {
                     item {
                         Box(Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(12.dp))) {
@@ -601,10 +653,14 @@ internal fun OrbitPluginScreen(
                                 Spacer(Modifier.height(12.dp))
                                 Text(channel?.label.orEmpty(), color = OrbitGold, fontSize = 15.sp)
                                 Text("播放来源：${selected?.name.orEmpty()}", color = OrbitMuted, fontSize = 13.sp)
+                                record?.let { entry ->
+                                    val status = if (orbitWatchComplete(entry.positionMs, entry.durationMs)) "已看完" else "观看中"
+                                    Text("上次观看：${entry.selection.episode.title} · $status", color = OrbitGold, fontSize = 15.sp)
+                                }
                                 Spacer(Modifier.height(22.dp))
                                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    (chapters.firstOrNull { it.id == resumeEntry?.selection?.episode?.id } ?: chapters.firstOrNull())?.let { first ->
-                                        OrbitAction(if (loading) "正在准备播放…" else if (resumeEntry != null) "▶  继续播放" else "▶  立即播放", primary = true, modifier = Modifier.focusRequester(entryFocusRequester).focusRequester(detailPlayFocus)) { playEpisode(first, detailPlayFocus) }
+                                    (chapters.firstOrNull { it.id == record?.selection?.episode?.id } ?: record?.selection?.episode ?: chapters.firstOrNull())?.let { first ->
+                                        OrbitAction(if (loading) "正在准备播放…" else if (record != null) "▶  继续播放" else "▶  立即播放", primary = true, modifier = Modifier.focusRequester(entryFocusRequester).focusRequester(detailPlayFocus)) { playEpisode(first, detailPlayFocus) }
                                     }
                                     OrbitAction("返回列表", modifier = Modifier.then(if (chapters.isEmpty()) Modifier.focusRequester(entryFocusRequester) else Modifier).focusRequester(detailBackFocus)) { returnToList() }
                                 }
@@ -632,7 +688,7 @@ internal fun OrbitPluginScreen(
                                 OrbitPosterCard(episode.title, episode.raw.orbitArtwork().ifBlank { video.imageUrl },
                                     "第 ${chapters.indexOf(episode) + 1} 集", Modifier.width(224.dp).focusRequester(episodeFocus), landscape = true) { playEpisode(episode, episodeFocus) }
                             }
-                            if (chaptersNext != null) item {
+                            if (chaptersNext != null || canOffsetPage(channel?.operations?.firstOrNull { it.operation == "page" && (it.scope == "chapters" || it.pagination?.scope == "chapters") }, chaptersHasMore)) item {
                                 OrbitAction(if (loadingMore) "正在加载…" else "更多选集") { loadMoreChapters() }
                             }
                         }
@@ -662,7 +718,7 @@ internal fun OrbitPluginScreen(
                                     showHistory = false
                                     selected = target
                                 } else if (target != null) {
-                                    historyOrigin = true; resumeEntry = entry; showHistory = false
+                                    historyOrigin = true; showHistory = false
                                     openVideo(entry.selection.video)
                                 }
                             }
@@ -694,7 +750,7 @@ internal fun OrbitPluginScreen(
                 if (tags.isNotEmpty() && tags.any { it != channel?.label }) {
                     Spacer(Modifier.height(12.dp))
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        item { OrbitAction("全部", selected = selectedTag == null) { selectedTag = null } }
+                        item { OrbitAction("全部", selected = selectedTag == null, modifier = Modifier.focusProperties { left = menuFocusRequester }) { selectedTag = null } }
                         items(tags) { tag -> OrbitAction(tag, selected = selectedTag == tag) { selectedTag = tag } }
                     }
                 }
@@ -709,20 +765,42 @@ internal fun OrbitPluginScreen(
                                 (0 until arr.length()).any { arr.optString(it) == selectedTag }
                             } == true
                         }
-                        Text("${channel?.label.orEmpty()} · ${visible.size} 部", color = OrbitGold, fontSize = 12.sp)
+                        val pageOperation = channel?.operations?.firstOrNull { it.operation == "page" && it.executable && it.scope == null && it.pagination?.scope == null }
+                        val hasNextPage = pageOperation != null && (next != null || canOffsetPage(pageOperation, listHasMore))
+                        LaunchedEffect(gridState, visible.size, hasNextPage, loading, loadingMore, pageLoadFailed, selectedTag) {
+                            if (visible.isNotEmpty() && hasNextPage && !loading && !loadingMore && !pageLoadFailed) {
+                                snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+                                    .distinctUntilChanged()
+                                    .collect { lastIndex ->
+                                        if (shouldLoadOrbitPage(lastIndex, visible.size, previewColumns)) loadMore()
+                                    }
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Text("${channel?.label.orEmpty()} · ${visible.size} 部", color = OrbitGold, fontSize = 12.sp)
+                            if (loadingMore) Text("⟳ 正在加载下一页…", color = Color.White, fontSize = 12.sp)
+                        }
                         Spacer(Modifier.height(8.dp))
                         LazyVerticalGrid(state = gridState, columns = GridCells.Fixed(previewColumns), modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                             itemsIndexed(visible, key = { _, item -> item.id }) { index, item ->
-                                val posterModifier = (if (index == gridState.firstVisibleItemIndex) Modifier.focusRequester(entryFocusRequester).focusRequester(firstPosterFocus) else Modifier)
-                                    .focusRequester(posterFocus.getValue(item.id))
+                                val lastIsVisible = gridState.layoutInfo.visibleItemsInfo.any { it.key == lastFocusedPosterId }
+                                val isEntry = if (lastIsVisible) item.id == lastFocusedPosterId else index == gridState.firstVisibleItemIndex
+                                val posterModifier = (if (isEntry) Modifier.focusRequester(entryFocusRequester).focusRequester(firstPosterFocus) else Modifier)
+                                    .then(if (index == 0) Modifier.focusRequester(topPosterFocus) else Modifier)
+                                    .focusRequester(posterFocus.getOrPut(item.id) { FocusRequester() })
+                                    .onFocusChanged { if (it.isFocused) lastFocusedPosterId = item.id }
                                     .focusProperties {
                                         if (index % previewColumns == 0) left = menuFocusRequester
                                         if (index < previewColumns) channelFocus["${selected?.id}:${selected?.channelId}"]?.let { up = it }
                                     }
-                                OrbitPosterCard(item.title, item.imageUrl, channel?.label.orEmpty(), modifier = posterModifier, aspectRatio = posterRatio) { resumeEntry = null; historyOrigin = false; openVideo(item) }
+                                OrbitPosterCard(item.title, item.imageUrl, channel?.label.orEmpty(), modifier = posterModifier, aspectRatio = posterRatio,
+                                    metadata = orbitCoverMetadata(selected?.pluginId, item.raw.opt("content") as? String)) { historyOrigin = false; openVideo(item) }
                             }
-                            if (next != null) item(span = { GridItemSpan(maxLineSpan) }) {
-                                OrbitAction(if (loadingMore) "正在加载下一页…" else "加载更多", primary = true, modifier = Modifier.fillMaxWidth()) { loadMore() }
+                            if (hasNextPage && (loadingMore || pageLoadFailed)) item(key = "orbit-page-status", span = { GridItemSpan(maxLineSpan) }) {
+                                if (pageLoadFailed) OrbitAction(if (loadingMore) "正在重试…" else "加载失败，重试", primary = true, modifier = Modifier.fillMaxWidth()) {
+                                    lastFocusedPosterId?.let { id -> runCatching { posterFocus[id]?.requestFocus() } }
+                                    loadMore()
+                                } else Text("正在加载下一页…", color = OrbitMuted, fontSize = 13.sp)
                             }
                         }
                         if (actionError != null) Text(actionError!!, color = OrbitGold, fontSize = 12.sp)
@@ -733,14 +811,20 @@ internal fun OrbitPluginScreen(
     }
 }
 
+internal fun nextOrbitEpisode(episodes: List<OrbitEpisodeItem>, currentId: String): OrbitEpisodeItem? {
+    val index = episodes.indexOfFirst { it.id == currentId }
+    return if (index >= 0) episodes.getOrNull(index + 1) else null
+}
+
 private fun org.json.JSONObject.orbitArtwork(): String =
     sequenceOf("image", "cover", "poster", "thumbnail").map { optString(it) }
         .firstOrNull { it.startsWith("https://") }.orEmpty()
 
 @Composable
-private fun OrbitPosterCard(
+internal fun OrbitPosterCard(
     title: String, image: String, subtitle: String, modifier: Modifier = Modifier,
-    landscape: Boolean = false, enabled: Boolean = true, aspectRatio: Float = .75f, onClick: () -> Unit
+    landscape: Boolean = false, enabled: Boolean = true, aspectRatio: Float = .75f,
+    metadata: OrbitCoverMetadata = OrbitCoverMetadata(null, null), onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(10.dp)
@@ -751,10 +835,44 @@ private fun OrbitPosterCard(
         Box(Modifier.fillMaxWidth().aspectRatio(if (landscape) 16f / 9f else aspectRatio).clip(RoundedCornerShape(7.dp))) {
             RemoteArtwork(image, title, Modifier.fillMaxSize())
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0x99090D13)))))
+            metadata.rating?.let { OrbitMetadataBadge(it, Modifier.align(Alignment.TopStart).padding(6.dp)) }
+            metadata.episodes?.let { OrbitMetadataBadge(it, Modifier.align(Alignment.TopEnd).padding(6.dp)) }
             Text(subtitle, Modifier.align(Alignment.BottomStart).padding(8.dp), color = OrbitMuted, fontSize = 11.sp, maxLines = 1)
         }
         Text(title, Modifier.padding(horizontal = 6.dp, vertical = 9.dp), color = if (focused) OrbitGold else Color.White,
             fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+@Composable
+internal fun OrbitMetadataBadge(label: String, modifier: Modifier = Modifier) {
+    Text(label, modifier.background(Color(0xD90B121A), RoundedCornerShape(5.dp)).padding(horizontal = 6.dp, vertical = 3.dp),
+        color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+}
+
+@Composable
+internal fun OrbitPluginLogo(config: OrbitPluginConfig, modifier: Modifier = Modifier, fallbackSize: androidx.compose.ui.unit.TextUnit = 22.sp) {
+    RemoteArtwork(config.logoUrl, config.name.ifBlank { "?" }, modifier.clip(RoundedCornerShape(9.dp)),
+        fallbackTextSize = fallbackSize, contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+}
+
+@Composable
+internal fun OrbitPluginPickerItem(config: OrbitPluginConfig, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(12.dp)
+    Row(modifier.onFocusChanged { focused = it.isFocused }
+        .background(if (focused) Color(0xFF344354) else Color(0xFF111B26), shape)
+        .border(if (focused || selected) 2.dp else 1.dp, if (focused) OrbitGold else Color(0xFF526171), shape)
+        .clickable(onClick = onClick).padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        OrbitPluginLogo(config, Modifier.size(48.dp))
+        Column(Modifier.weight(1f)) {
+            Text(config.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            Text(config.description.ifBlank { "暂无插件说明" }, color = OrbitMuted, fontSize = 12.sp, maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+        }
+        if (selected) Text("当前", color = OrbitGold, fontSize = 12.sp)
     }
 }
 
