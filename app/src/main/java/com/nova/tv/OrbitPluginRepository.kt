@@ -66,7 +66,7 @@ internal data class OrbitPageContext(
     val next: String?
 )
 
-internal class OrbitApiException(message: String, val status: Int? = null) : Exception(message)
+internal class OrbitApiException(message: String, val status: Int? = null, val deviceRevoked: Boolean = false) : Exception(message)
 
 /** Device-only Orbit adapter. Orbit is contacted exclusively through the bound Hub. */
 internal class OrbitPluginRepository(private val credentials: DeviceCredentialStore) {
@@ -144,7 +144,7 @@ internal class OrbitPluginRepository(private val credentials: DeviceCredentialSt
             return try {
                 parseHubDataEnvelope(status, text)
             } catch (failure: OrbitApiException) {
-                if (failure.status == 401 || status == 401) credentials.markRevoked()
+                if (failure.deviceRevoked) credentials.markRevoked()
                 throw failure
             }
         } catch (failure: OrbitApiException) {
@@ -193,7 +193,7 @@ internal fun parseOrbitChannel(data: JSONObject, channelId: String): OrbitChanne
 
 internal fun parseHubDataEnvelope(httpStatus: Int, raw: String): JSONObject {
     val envelope = runCatching { JSONObject(raw) }.getOrElse { throw OrbitApiException("无法读取 Hub 响应", httpStatus) }
-    if (httpStatus == 401 || envelope.optInt("code") == 40100) throw OrbitApiException("Hub 设备凭证已失效，请重新绑定", httpStatus)
+    if (httpStatus == 401 && envelope.optInt("code") == 40100) throw OrbitApiException("Hub 设备凭证已失效，请重新绑定", httpStatus, deviceRevoked = true)
     if (httpStatus !in 200..299 || envelope.optInt("code") != 200) {
         val message = envelope.optString("message").takeIf(String::isNotBlank) ?: "Hub 请求失败（$httpStatus）"
         throw OrbitApiException(message, httpStatus)
