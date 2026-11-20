@@ -674,12 +674,14 @@ internal fun OrbitPluginScreen(
                 val canSearch = channel?.operations?.any { it.operation == "search" && it.executable } == true
                 val featureSearch = channel?.features?.optJSONObject("search")
                 if (canSearch) {
+                    var inputFocused by remember(selected?.id, selected?.channelId) { mutableStateOf(false) }
+                    PhoneSearchInputSession(inputFocused, query) { query = it }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         BasicTextField(
                             value = query, onValueChange = { query = it }, singleLine = true,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = { activeQuery = query.trim(); keyboard?.hide(); loadFirstPage(activeQuery) }),
-                            modifier = Modifier.weight(1f).background(Color(0xFF18212D), RoundedCornerShape(10.dp)).padding(14.dp),
+                            modifier = Modifier.weight(1f).onFocusChanged { inputFocused = it.hasFocus }.background(Color(0xFF18212D), RoundedCornerShape(10.dp)).padding(14.dp),
                             textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 16.sp),
                             decorationBox = { inner -> if (query.isEmpty()) Text("搜索 ${featureSearch?.optString("param") ?: "内容"}", color = OrbitMuted, fontSize = 14.sp); inner() }
                         )

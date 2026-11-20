@@ -102,6 +102,11 @@ internal class HubSyncApi(private val credentials: DeviceCredentialStore) {
 
     fun settings(trigger: SyncTrigger): HubHttpReply = request("GET", path("/device/settings"), trigger = trigger)
 
+    fun createInputSession(): HubHttpReply = request("POST", path("/device/input-sessions"))
+    fun inputSession(id: String): HubHttpReply = request("GET", path("/device/input-sessions/$id"))
+    fun closeInputSession(id: String): HubHttpReply = request("DELETE", path("/device/input-sessions/$id"))
+
+
     private fun path(path: String): String = endpoint(credentials.hubUrl ?: error("Hub 地址未设置"), path)
 
     private fun request(method: String, url: String, body: JSONObject? = null, token: String? = credentials.readToken(), trigger: SyncTrigger? = null): HubHttpReply {

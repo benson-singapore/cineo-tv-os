@@ -121,6 +121,8 @@ fun VideoSearchScreen(
 ) {
     val source = remember(repository) { repository.defaultSource() }
     var query by remember { mutableStateOf("") }
+    var inputFocused by remember { mutableStateOf(false) }
+    PhoneSearchInputSession(inputFocused, query) { query = it }
     var result by remember { mutableStateOf<SearchResult?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -159,7 +161,7 @@ fun VideoSearchScreen(
                 label = "片名 / 关键词",
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).onFocusChanged { inputFocused = it.hasFocus }.focusProperties { left = menuFocusRequester },
                 inputFocusRequester = entryFocusRequester,
                 onSubmit = { search() }
             )
