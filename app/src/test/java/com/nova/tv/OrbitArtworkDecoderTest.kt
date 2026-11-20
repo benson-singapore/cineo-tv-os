@@ -17,6 +17,9 @@ class OrbitArtworkDecoderTest {
 
     @Test fun limitsCompatibilityToExactImageHosts() {
         assertTrue(OrbitArtworkDecoder.supports("https://pic.drleao.cn/upload/a.jpeg"))
+        assertTrue(OrbitArtworkDecoder.supports("https://pic.qnlycc.cn/upload/a.jpeg?auth_key=test"))
+        assertFalse(OrbitArtworkDecoder.supports("https://pic.qnlycc.cn.example.org/a.jpeg"))
+        assertNull(OrbitArtworkDecoder.webpFallback("https://pic.qnlycc.cn/upload/a.jpeg?auth_key=test"))
         assertFalse(OrbitArtworkDecoder.supports("https://pic.drleao.cn.example.org/a.jpeg"))
         assertFalse(OrbitArtworkDecoder.supports("file:///a.jpeg"))
         assertEquals("https://new2.drleao.cn/upload/a.jpeg.webp",

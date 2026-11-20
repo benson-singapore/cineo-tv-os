@@ -7,7 +7,7 @@ import javax.crypto.spec.SecretKeySpec
 
 /** Matches the site's crypto-image-worker.js; credentials are UTF-8, not hex. */
 internal object OrbitArtworkDecoder {
-    private val hosts = setOf("pic.drleao.cn", "new.drleao.cn", "image.drleao.cn", "pic.aluxvl.cn", "aihuangdou.com", "new2.drleao.cn")
+    private val hosts = setOf("pic.qnlycc.cn", "pic.drleao.cn", "new.drleao.cn", "image.drleao.cn", "pic.aluxvl.cn", "aihuangdou.com", "new2.drleao.cn")
 
     fun supports(url: String): Boolean = runCatching {
         val uri = URI(url)
@@ -16,7 +16,7 @@ internal object OrbitArtworkDecoder {
 
     fun webpFallback(url: String): String? = runCatching {
         val uri = URI(url)
-        if (!supports(url) || uri.host.equals("new2.drleao.cn", true) ||
+        if (!supports(url) || uri.host.equals("pic.qnlycc.cn", true) || uri.host.equals("new2.drleao.cn", true) ||
             uri.rawPath.startsWith("/static/") ||
             !Regex("\\.(jpe?g|png|bmp)$", RegexOption.IGNORE_CASE).containsMatchIn(uri.rawPath)) null
         else "https://new2.drleao.cn${uri.rawPath}.webp"
