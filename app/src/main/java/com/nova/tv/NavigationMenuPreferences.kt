@@ -22,8 +22,8 @@ class NavigationMenuPreferences(context: Context) {
             ?.distinct()
             .orEmpty()
         val order = savedOrder + menuItems.filterNot { it in savedOrder }
-        val hiddenItems = database.readAppSetting(HIDDEN_KEY)
-            .orEmpty()
+        val hiddenItems = (database.readAppSetting(HIDDEN_KEY)
+            ?: defaultHiddenItems.joinToString(ITEM_SEPARATOR))
             .split(ITEM_SEPARATOR)
             .filter { it in menuItems && it != HOME_ITEM }
             .toSet()
@@ -67,6 +67,8 @@ class NavigationMenuPreferences(context: Context) {
             "搜索",
             "Orbit"
         )
+        val defaultHiddenItems = setOf("纪录片", "继续观看", "收藏", "Orbit")
+        fun defaults() = NavigationMenuSettings(menuItems, menuItems.toSet() - defaultHiddenItems)
 
         private const val ORDER_KEY = "order"
         private const val HIDDEN_KEY = "hidden"

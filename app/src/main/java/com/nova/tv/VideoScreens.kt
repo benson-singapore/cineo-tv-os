@@ -1640,8 +1640,7 @@ private fun MenuConfigurationPage(
                 Text("控制左侧主菜单的显示状态和排列顺序", color = ScreenMuted, fontSize = 13.sp)
             }
             TvActionButton("恢复默认", modifier = Modifier.focusRequester(entryFocusRequester), onClick = {
-                val defaults = NavigationMenuPreferences.menuItems
-                onSettingsChange(NavigationMenuSettings(defaults, defaults.toSet()))
+                onSettingsChange(NavigationMenuPreferences.defaults())
             })
         }
         Spacer(Modifier.height(22.dp))
