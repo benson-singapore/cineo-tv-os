@@ -50,6 +50,22 @@ class OrbitNextDiscoveryTest {
         try { bounded.next("1"); fail() } catch (_: OrbitNextUnknown) { }
         assertEquals(5, calls)
     }
+    @Test fun manualPageLoadUpdatesSelectableEpisodesAndConfirmedTotal() = runBlocking {
+        val d = discovery { OrbitChapterPage(listOf(episode("2"), episode("2"), episode("3")), null, false) }
+        assertTrue(d.canLoadMore)
+        d.loadMore()
+        assertEquals(listOf("1", "2", "3"), d.episodes.map { it.id })
+        assertEquals(false, d.hasMore)
+        assertFalse(d.canLoadMore)
+        assertEquals("2", d.next("1")?.id)
+        assertNull(d.next("3"))
+    }
+    @Test fun unknownTotalIsNotMistakenForEnd() = runBlocking {
+        val d = discovery(more = null, operation = null, cursor = null) { fail(); error("unreachable") }
+        assertNull(d.hasMore)
+        assertFalse(d.canLoadMore)
+        assertEquals(listOf("1"), d.episodes.map { it.id })
+    }
     @Test fun sameUrlUsesDifferentChapterIdentity() {
         val video = OrbitVideoItem("v", "title", "", "", JSONObject())
         val a = OrbitWatchSelection("p", "c", video, episode("1"))

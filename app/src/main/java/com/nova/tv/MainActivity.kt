@@ -214,6 +214,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
     var playbackEpisode by remember { mutableStateOf<PlaybackEpisode?>(null) }
     var invalidateOrbitPlayback by remember { mutableStateOf<(() -> Unit)?>(null) }
     var orbitPlayback by remember { mutableStateOf<OrbitWatchSelection?>(null) }
+    var orbitSession by remember { mutableStateOf<OrbitPlaybackSession?>(null) }
     var orbitNextResolver by remember { mutableStateOf<(suspend (OrbitWatchSelection) -> PreparedPlaybackNext?)?>(null) }
     var playbackVideo by remember { mutableStateOf<RemoteVideo?>(null) }
     var playbackTitle by remember { mutableStateOf("") }
@@ -303,6 +304,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                 playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit(key) }
             }
             orbitPlayback = null
+            orbitSession = null
             orbitNextResolver = null
             val fallbackRequester = when {
                 remoteDetail != null -> detailEntryFocus
@@ -379,7 +381,8 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     entryFocusRequester = sectionContentEntryFocus,
                     menuFocusRequester = sectionNavigationFocus,
                     history = orbitHistory,
-                    onPlay = { video, line, selectedEpisode, returnFocusRequester, selection, startPosition, invalidate, resolver ->
+                    onPlay = { video, line, selectedEpisode, returnFocusRequester, selection, startPosition, invalidate, resolver, session ->
+                        orbitSession = session
                         orbitNextResolver = resolver
                         invalidateOrbitPlayback = invalidate
                         orbitPlayback = selection
@@ -560,6 +563,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                 episodes = playbackEpisodes,
                 orbitSelection = playingOrbit,
                 orbitNextResolver = orbitNextResolver,
+                orbitSession = orbitSession,
                 onAutoNext = { next ->
                     currentProgressKey = null
                     next.orbitSelection?.let { orbitHistory.save(it, 0L, 0L) }
@@ -569,11 +573,11 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     if (next.orbitSelection != null) playbackEpisodes = listOf(next.episode)
                 },
                 startPositionMs = playbackStartPositionMs,
-                exitOnBack = playingOrbit != null,
                 onPlaybackError = { if (playingOrbit != null) invalidateOrbitPlayback?.invoke() },
                 onSwitchSource = { sourceVideo, sourceLine, sourceEpisode, position ->
                     currentProgressKey = null
                     orbitPlayback = null
+                    orbitSession = null
                     orbitNextResolver = null
                     playbackVideo = sourceVideo
                     playbackTitle = sourceVideo.title
@@ -592,6 +596,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     playbackVideo = null
                     playbackEpisodes = emptyList()
                     playbackStartPositionMs = 0L
+                    orbitSession = null
                     orbitNextResolver = null
                     contentRevision++
                 },

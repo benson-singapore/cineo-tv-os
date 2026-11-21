@@ -5,6 +5,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PlaybackNextEpisodeTest {
+    @Test fun playbackExitRequiresTwoBackPressesWithinTimeout() {
+        assertFalse(isPlaybackExitConfirmed(null, 1_000))
+        assertTrue(isPlaybackExitConfirmed(1_000, 2_999))
+        assertFalse(isPlaybackExitConfirmed(1_000, 3_000))
+        assertFalse(isPlaybackExitConfirmed(1_000, 999))
+    }
+
     @Test fun preloadsOnlyNearKnownEnd() {
         assertFalse(shouldPreloadNext(-1, 0))
         assertFalse(shouldPreloadNext(180_000, 119_999))

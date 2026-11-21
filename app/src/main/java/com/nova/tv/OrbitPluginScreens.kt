@@ -76,7 +76,7 @@ internal fun OrbitPluginScreen(
     entryFocusRequester: FocusRequester,
     menuFocusRequester: FocusRequester,
     history: OrbitWatchHistory,
-    onPlay: (RemoteVideo, PlaybackLine, PlaybackEpisode, FocusRequester, OrbitWatchSelection, Long, () -> Unit, suspend (OrbitWatchSelection) -> PreparedPlaybackNext?) -> Unit
+    onPlay: (RemoteVideo, PlaybackLine, PlaybackEpisode, FocusRequester, OrbitWatchSelection, Long, () -> Unit, suspend (OrbitWatchSelection) -> PreparedPlaybackNext?, OrbitPlaybackSession) -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -387,15 +387,15 @@ internal fun OrbitPluginScreen(
                         }
                     }
                     val nextBaseContext = baseContext(config, op, activeQuery)
-                    val resolver: suspend (OrbitWatchSelection) -> PreparedPlaybackNext? = { current ->
-                        val nextEpisode = discovery.next(current.episode.id)
-                        if (nextEpisode == null) null else {
-                            val nextContext = nextBaseContext.copy(target = mapOf(parentKey to video.id, chapterKey to nextEpisode.id))
-                            val resolved = withContext(Dispatchers.IO) { repository.playback(repository.invoke(config, nextContext)) }
-                            PreparedPlaybackNext(PlaybackEpisode(resolved.title.ifBlank { nextEpisode.title }, resolved.url), current.copy(episode = nextEpisode))
-                        }
+                    val resolve: suspend (OrbitWatchSelection, OrbitEpisodeItem) -> PreparedPlaybackNext = { current, target ->
+                        val nextContext = nextBaseContext.copy(target = mapOf(parentKey to video.id, chapterKey to target.id))
+                        val resolved = withContext(Dispatchers.IO) { repository.playback(repository.invoke(config, nextContext)) }
+                        PreparedPlaybackNext(PlaybackEpisode(resolved.title.ifBlank { target.title }, resolved.url), current.copy(episode = target))
                     }
-                    onPlay(remoteVideo(video, config), PlaybackLine("Orbit", listOf(PlaybackEpisode(playback.title.ifBlank { episode.title }, playback.url))), PlaybackEpisode(playback.title.ifBlank { episode.title }, playback.url), returnFocus, OrbitWatchSelection(config.id, config.channelId, video, episode), position, { playbackCache.remove(cacheKey) }, resolver)
+                    val resolver: suspend (OrbitWatchSelection) -> PreparedPlaybackNext? = { current ->
+                        discovery.next(current.episode.id)?.let { resolve(current, it) }
+                    }
+                    onPlay(remoteVideo(video, config), PlaybackLine("Orbit", listOf(PlaybackEpisode(playback.title.ifBlank { episode.title }, playback.url))), PlaybackEpisode(playback.title.ifBlank { episode.title }, playback.url), returnFocus, OrbitWatchSelection(config.id, config.channelId, video, episode), position, { playbackCache.remove(cacheKey) }, resolver, OrbitPlaybackSession(discovery, resolve))
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { if (generation == requestGeneration) actionError = failure.message ?: "无法播放此章节" }

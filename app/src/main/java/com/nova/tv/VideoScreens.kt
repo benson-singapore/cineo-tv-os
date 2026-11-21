@@ -2451,9 +2451,9 @@ internal fun TvVideoPlayerScreen(
     episodes: List<PlaybackEpisode>,
     orbitSelection: OrbitWatchSelection?,
     orbitNextResolver: (suspend (OrbitWatchSelection) -> PreparedPlaybackNext?)?,
+    orbitSession: OrbitPlaybackSession?,
     onAutoNext: (PreparedPlaybackNext) -> Unit,
     startPositionMs: Long = 0L,
-    exitOnBack: Boolean = false,
     onPlaybackError: () -> Unit = {},
     onSelectEpisode: (PlaybackEpisode) -> Unit,
     onExit: () -> Unit,
@@ -2483,11 +2483,11 @@ internal fun TvVideoPlayerScreen(
             episodes = episodes,
             orbitSelection = orbitSelection,
             orbitNextResolver = orbitNextResolver,
+            orbitSession = orbitSession,
             onAutoNext = onAutoNext,
             startPositionMs = startPositionMs,
             onSelectEpisode = onSelectEpisode,
             onExit = onExit,
-            exitOnBack = exitOnBack,
             onError = { playbackError = it; onPlaybackError() },
             onProgress = onProgress,
             onPause = onPause
@@ -2517,11 +2517,11 @@ private fun PlayerSurface(
     episodes: List<PlaybackEpisode>,
     orbitSelection: OrbitWatchSelection?,
     orbitNextResolver: (suspend (OrbitWatchSelection) -> PreparedPlaybackNext?)?,
+    orbitSession: OrbitPlaybackSession?,
     onAutoNext: (PreparedPlaybackNext) -> Unit,
     startPositionMs: Long,
     onSelectEpisode: (PlaybackEpisode) -> Unit,
     onExit: () -> Unit,
-    exitOnBack: Boolean,
     onError: (String) -> Unit,
     onProgress: (Long, Long) -> Unit,
     onPause: () -> Unit
@@ -2532,6 +2532,7 @@ private fun PlayerSurface(
         preloadConfiguration = ExoPlayer.PreloadConfiguration(5_000_000L)
     } }
     var queuedNext by remember(player) { mutableStateOf<PreparedPlaybackNext?>(null) }
+    var preloadGeneration by remember(player) { mutableIntStateOf(0) }
     var lastKnownDuration by remember(player) { mutableLongStateOf(0L) }
     val autoNextCallback by rememberUpdatedState(onAutoNext)
     val currentOrbitSelection by rememberUpdatedState(orbitSelection)
@@ -2546,7 +2547,13 @@ private fun PlayerSurface(
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
     var playbackSpeed by remember(player) { mutableFloatStateOf(1f) }
     val availableEpisodes = episodes.ifEmpty { listOf(episode) }
-    val currentEpisodeIndex = availableEpisodes.indexOfFirst { it.url == episode.url }.coerceAtLeast(0)
+    val orbitEpisodes = orbitSession?.discovery?.episodes.orEmpty()
+    val currentOrbitIndex = orbitEpisodes.indexOfFirst { it.id == orbitSelection?.episode?.id }
+    val currentEpisodeIndex = if (orbitSelection != null) currentOrbitIndex.coerceAtLeast(0)
+        else availableEpisodes.indexOfFirst { it.url == episode.url }.coerceAtLeast(0)
+    val playerScope = rememberCoroutineScope()
+    var orbitActionLoading by remember { mutableStateOf(false) }
+    var orbitActionError by remember { mutableStateOf<String?>(null) }
     val episodeListState = rememberLazyListState((currentEpisodeIndex - 3).coerceAtLeast(0))
     val currentEpisodeFocusRequester = remember { FocusRequester() }
     val selectedSpeedFocusRequester = remember { FocusRequester() }
@@ -2555,12 +2562,28 @@ private fun PlayerSurface(
     val openPanelCallback = rememberUpdatedState<() -> Unit>({ showEpisodePanel = true })
 
     var controllerVisible by remember { mutableStateOf(false) }
-    BackHandler(enabled = exitOnBack || showEpisodePanel || controllerVisible) {
+    var backPressedAt by remember(playbackId) { mutableStateOf<Long?>(null) }
+    BackHandler {
         if (showEpisodePanel) {
             showEpisodePanel = false
             playerView?.hideController()
-        } else if (exitOnBack) onExit()
-        else playerView?.hideController()
+            backPressedAt = null
+        } else {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (isPlaybackExitConfirmed(backPressedAt, now)) {
+                backPressedAt = null
+                onExit()
+            } else {
+                playerView?.hideController()
+                backPressedAt = now
+            }
+        }
+    }
+    LaunchedEffect(backPressedAt) {
+        if (backPressedAt != null) {
+            delay(PLAYBACK_BACK_CONFIRM_MS)
+            backPressedAt = null
+        }
     }
 
     LaunchedEffect(showEpisodePanel, currentEpisodeIndex) {
@@ -2638,6 +2661,7 @@ private fun PlayerSurface(
             if (queuedNext != null || (!nearEnd && !ended)) continue
             if (ended && attemptedAtEnd || !ended && attemptedBeforeEnd) continue
             if (ended) attemptedAtEnd = true else attemptedBeforeEnd = true
+            val generation = preloadGeneration
             val next = try {
                 val selection = currentOrbitSelection
                 if (selection != null) currentOrbitResolver?.invoke(selection)
@@ -2645,13 +2669,13 @@ private fun PlayerSurface(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (unknown: OrbitNextUnknown) {
-                if (ended) errorCallback(unknown.message ?: "无法确认下一集")
+                if (ended && generation == preloadGeneration) errorCallback(unknown.message ?: "无法确认下一集")
                 null
             } catch (_: Exception) {
-                if (ended) errorCallback("下一集加载失败，请返回选集重试")
+                if (ended && generation == preloadGeneration) errorCallback("下一集加载失败，请返回选集重试")
                 null
             }
-            if (next != null && orbitPlaybackIdentity(next.orbitSelection, next.episode.url) != playbackId && player.currentMediaItem?.mediaId == playbackId) {
+            if (next != null && generation == preloadGeneration && orbitPlaybackIdentity(next.orbitSelection, next.episode.url) != playbackId && player.currentMediaItem?.mediaId == playbackId) {
                 try {
                     queuedNext = next
                     player.addMediaItem(playbackMediaItem(next.episode.url, orbitPlaybackIdentity(next.orbitSelection, next.episode.url)))
@@ -2733,6 +2757,16 @@ private fun PlayerSurface(
                 if (playerView === view) playerView = null
             }
         )
+        if (backPressedAt != null) {
+            Text(
+                "再按一次返回键退出播放",
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp)
+                    .clip(RoundedCornerShape(8.dp)).background(Color(0xE0202935))
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                color = Color.White,
+                fontSize = 16.sp
+            )
+        }
         if (controllerVisible) {
             Column(Modifier.align(Alignment.TopStart).padding(28.dp)) {
                 Text(videoTitle, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
@@ -2753,8 +2787,15 @@ private fun PlayerSurface(
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("选集", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(12.dp))
-                    val currentNumber = episodeNumber(episode.title) ?: currentEpisodeIndex + 1
-                    Text("第 $currentNumber 集  /  共 ${availableEpisodes.size} 集", color = ScreenMuted, fontSize = 12.sp)
+                    val status = if (orbitSelection != null) {
+                        val current = if (currentOrbitIndex >= 0) "第 ${currentOrbitIndex + 1} 集" else orbitSelection.episode.title
+                        val total = if (orbitSession?.discovery?.hasMore == false) "共 ${orbitEpisodes.size} 集" else "已加载 ${orbitEpisodes.size} 集"
+                        "$current  /  $total"
+                    } else {
+                        val currentNumber = episodeNumber(episode.title) ?: currentEpisodeIndex + 1
+                        "第 $currentNumber 集  /  共 ${availableEpisodes.size} 集"
+                    }
+                    Text(status, color = ScreenMuted, fontSize = 12.sp)
                 }
                 Spacer(Modifier.height(12.dp))
                 LazyRow(
@@ -2762,21 +2803,68 @@ private fun PlayerSurface(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(horizontal = 2.dp)
                 ) {
-                    itemsIndexed(availableEpisodes, key = { _, item -> item.url }) { index, item ->
-                        val number = episodeNumber(item.title) ?: index + 1
-                        PlayerPanelButton(
-                            label = "$number",
-                            selected = index == currentEpisodeIndex,
-                            modifier = Modifier.width(64.dp)
-                                .then(if (index == currentEpisodeIndex) Modifier.focusRequester(currentEpisodeFocusRequester) else Modifier)
-                                .focusProperties { down = selectedSpeedFocusRequester },
-                            onClick = {
-                                if (player.duration > 0) progressCallback(player.currentPosition.coerceAtLeast(0L), player.duration)
-                                selectEpisodeCallback(item)
-                            }
-                        )
+                    if (orbitSelection != null && orbitSession != null) {
+                        itemsIndexed(orbitEpisodes, key = { _, item -> item.id }) { index, item ->
+                            PlayerPanelButton(
+                                label = "${index + 1}", selected = item.id == orbitSelection.episode.id,
+                                modifier = Modifier.width(64.dp)
+                                    .then(if (index == currentOrbitIndex) Modifier.focusRequester(currentEpisodeFocusRequester) else Modifier)
+                                    .focusProperties { down = selectedSpeedFocusRequester },
+                                onClick = {
+                                    if (!orbitActionLoading && item.id != orbitSelection.episode.id) {
+                                        orbitActionLoading = true; orbitActionError = null
+                                        playerScope.launch {
+                                            try {
+                                                val result = orbitSession.resolve(orbitSelection, item)
+                                                if (currentOrbitSelection == orbitSelection && player.currentMediaItem?.mediaId == playbackId) {
+                                                    if (player.duration > 0) progressCallback(player.currentPosition.coerceAtLeast(0L), player.duration)
+                                                    preloadGeneration++
+                                                    queuedNext = null
+                                                    lastKnownDuration = 0L
+                                                    player.setMediaItem(playbackMediaItem(result.episode.url, orbitPlaybackIdentity(result.orbitSelection, result.episode.url)))
+                                                    player.prepare()
+                                                    player.playWhenReady = true
+                                                    autoNextCallback(result)
+                                                }
+                                            } catch (cancelled: CancellationException) { throw cancelled }
+                                            catch (_: Exception) { orbitActionError = "无法加载该集，请重试" }
+                                            finally { orbitActionLoading = false }
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                        if (orbitSession.discovery.canLoadMore) item(key = "more-orbit-episodes") {
+                            PlayerPanelButton(label = if (orbitActionLoading) "加载中…" else "更多选集",
+                                modifier = Modifier.focusProperties { down = selectedSpeedFocusRequester }, onClick = {
+                                    if (!orbitActionLoading) {
+                                        orbitActionLoading = true; orbitActionError = null
+                                        playerScope.launch {
+                                            try { orbitSession.discovery.loadMore() }
+                                            catch (cancelled: CancellationException) { throw cancelled }
+                                            catch (_: Exception) { orbitActionError = "无法加载更多选集，请返回详情页查看" }
+                                            finally { orbitActionLoading = false }
+                                        }
+                                    }
+                                })
+                        }
+                    } else {
+                        itemsIndexed(availableEpisodes, key = { _, item -> item.url }) { index, item ->
+                            val number = episodeNumber(item.title) ?: index + 1
+                            PlayerPanelButton(
+                                label = "$number", selected = index == currentEpisodeIndex,
+                                modifier = Modifier.width(64.dp)
+                                    .then(if (index == currentEpisodeIndex) Modifier.focusRequester(currentEpisodeFocusRequester) else Modifier)
+                                    .focusProperties { down = selectedSpeedFocusRequester },
+                                onClick = {
+                                    if (player.duration > 0) progressCallback(player.currentPosition.coerceAtLeast(0L), player.duration)
+                                    selectEpisodeCallback(item)
+                                }
+                            )
+                        }
                     }
                 }
+                orbitActionError?.let { Text(it, color = AccentGold, fontSize = 12.sp) }
                 Spacer(Modifier.height(16.dp))
                 Text("播放倍数", color = ScreenMuted, fontSize = 12.sp)
                 Spacer(Modifier.height(8.dp))
@@ -2827,6 +2915,11 @@ private fun PlayerSurface(
         }
     }
 }
+
+internal const val PLAYBACK_BACK_CONFIRM_MS = 2_000L
+
+internal fun isPlaybackExitConfirmed(previousPressMs: Long?, nowMs: Long): Boolean =
+    previousPressMs != null && nowMs >= previousPressMs && nowMs - previousPressMs < PLAYBACK_BACK_CONFIRM_MS
 
 internal fun shouldPreloadNext(durationMs: Long, positionMs: Long): Boolean =
     durationMs > 0 && durationMs - positionMs.coerceAtLeast(0L) <= 60_000L
