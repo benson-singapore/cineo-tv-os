@@ -342,6 +342,21 @@ internal fun parseOrbitEpisodes(data: JSONObject): List<OrbitEpisodeItem> {
     return mapped
 }
 
+internal fun parseOrbitDirectPlayback(data: JSONObject): OrbitPlayback {
+    val item = data.optJSONArray("items")?.optJSONObject(0) ?: data
+    val media = item.optJSONArray("media")
+    val candidates = sequence {
+        for (index in 0 until (media?.length() ?: 0)) {
+            val entry = media?.optJSONObject(index) ?: continue
+            if (entry.optString("type").let { it.isBlank() || it.equals("video", ignoreCase = true) }) yield(entry.optString("url"))
+        }
+        yield(item.optString("url"))
+    }
+    val uri = candidates.mapNotNull(::safeMediaUri).firstOrNull()
+        ?: throw OrbitApiException("此作品没有受支持的 HTTPS 播放地址")
+    return OrbitPlayback(item.optString("title").ifBlank { "第 1 集" }, uri)
+}
+
 internal fun parseOrbitPlayback(data: JSONObject): OrbitPlayback {
     val item = data.optJSONArray("items")?.optJSONObject(0) ?: data
     val uri = safeMediaUri(item.optString("url"))

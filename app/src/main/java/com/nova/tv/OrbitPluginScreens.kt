@@ -289,12 +289,14 @@ internal fun OrbitPluginScreen(
     fun openVideo(item: OrbitVideoItem) {
         if (loading) return
         val config = selected ?: return
-        val op = channel?.operations?.firstOrNull { it.operation == "chapters" && it.executable }
-        if (op == null) { actionError = "此频道未声明选集能力"; return }
-        val targetKey = op.targets.keys.firstOrNull { it == "itemId" } ?: run { actionError = "章节能力缺少 target 声明"; return }
+        val chaptersOp = channel?.operations?.firstOrNull { it.operation == "chapters" && it.executable }
+        val op = chaptersOp ?: channel?.operations?.firstOrNull { it.operation == "detail" && it.executable }
+        if (op == null) { actionError = "此频道未声明可用的详情或选集能力"; return }
+        val targetKey = op.targets.keys.firstOrNull { it == "itemId" } ?: run { actionError = "详情能力缺少作品 target 声明"; return }
+        val directDetail = chaptersOp == null
         val context = baseContext(config, op, activeQuery, mapOf(targetKey to item.id))
         val cacheKey = "${config.id}:${config.channelId}:${item.id}"
-        val cached = chapterCache[cacheKey]?.takeIf { it.second != null }
+        val cached = if (directDetail) null else chapterCache[cacheKey]?.takeIf { it.second != null }
         returnFocusId = item.id
         selectedVideo = item; selectedEpisode = null; chapters = emptyList(); chaptersNext = null; chapterContext = context
         actionError = null; detailFocusPending = true; loadingMore = false
@@ -309,14 +311,18 @@ internal fun OrbitPluginScreen(
         scope.launch {
             try {
                 val raw = withContext(Dispatchers.IO) { repository.invoke(config, context) }
-                val result = repository.listEpisodes(raw)
+                val directPlayback = if (directDetail) parseOrbitDirectPlayback(raw) else null
+                val result = if (directDetail) listOf(OrbitEpisodeItem("single:${item.id}", "第 1 集", org.json.JSONObject()))
+                    else repository.listEpisodes(raw)
                 if (generation == requestGeneration && selectedVideo?.id == item.id) {
                     chapters = result
-                    chaptersEndState = raw.opt("hasMore") as? Boolean
+                    chaptersEndState = if (directDetail) false else raw.opt("hasMore") as? Boolean
                     chaptersHasMore = chaptersEndState != false
                     chaptersNext = raw.optJSONObject("next")?.toString().takeIf { chaptersHasMore }
                     chapterContext = context.copy(next = chaptersNext)
-                    chapterCache[cacheKey] = Triple(chapters, chaptersNext, chapterContext!!)
+                    if (directPlayback != null) {
+                        playbackCache["${config.id}:${config.channelId}:${item.id}:${result.first().id}"] = SystemClock.elapsedRealtime() to directPlayback
+                    } else chapterCache[cacheKey] = Triple(chapters, chaptersNext, chapterContext!!)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) { if (generation == requestGeneration) actionError = failure.message ?: "读取选集失败" }
@@ -367,11 +373,15 @@ internal fun OrbitPluginScreen(
         if (loading) return
         val config = selected ?: return
         val video = selectedVideo ?: return
-        val op = channel?.operations?.firstOrNull { it.operation == "chapterDetail" && it.executable }
-        if (op == null) { actionError = "此频道未声明章节播放信息能力"; return }
-        val parentKey = op.targets.keys.firstOrNull { it == "itemId" } ?: run { actionError = "章节详情缺少作品 target 声明"; return }
-        val chapterKey = op.targets.keys.firstOrNull { it == "chapterId" } ?: run { actionError = "章节详情缺少章节 target 声明"; return }
-        val context = baseContext(config, op, activeQuery, mapOf(parentKey to video.id, chapterKey to episode.id))
+        val directDetail = channel?.operations?.none { it.operation == "chapters" && it.executable } == true
+        val op = channel?.operations?.firstOrNull { it.operation == (if (directDetail) "detail" else "chapterDetail") && it.executable }
+        if (op == null) { actionError = "此频道未声明播放信息能力"; return }
+        val parentKey = op.targets.keys.firstOrNull { it == "itemId" } ?: run { actionError = "播放详情缺少作品 target 声明"; return }
+        val chapterKey = if (directDetail) null else op.targets.keys.firstOrNull { it == "chapterId" }
+            ?: run { actionError = "章节详情缺少章节 target 声明"; return }
+        fun playbackTarget(target: OrbitEpisodeItem): Map<String, String> =
+            mapOf(parentKey to video.id) + (chapterKey?.let { mapOf(it to target.id) } ?: emptyMap())
+        val context = baseContext(config, op, activeQuery, playbackTarget(episode))
         selectedEpisode = episode
         loading = true; playbackLoading = true; playbackLoadingFocus = returnFocus; actionError = null
         val cacheKey = "${config.id}:${config.channelId}:${video.id}:${episode.id}"
@@ -379,7 +389,10 @@ internal fun OrbitPluginScreen(
         scope.launch {
             try {
                 val cached = playbackCache[cacheKey]?.takeIf { SystemClock.elapsedRealtime() - it.first < 5 * 60_000L }
-                val playback = cached?.second ?: withContext(Dispatchers.IO) { repository.playback(repository.invoke(config, context)) }
+                val playback = cached?.second ?: withContext(Dispatchers.IO) {
+                    val raw = repository.invoke(config, context)
+                    if (directDetail) parseOrbitDirectPlayback(raw) else repository.playback(raw)
+                }
                 if (cached == null && generation == requestGeneration) playbackCache[cacheKey] = SystemClock.elapsedRealtime() to playback
                 if (generation == requestGeneration && selectedVideo?.id == video.id) {
                     actionError = null
@@ -400,8 +413,11 @@ internal fun OrbitPluginScreen(
                     }
                     val nextBaseContext = baseContext(config, op, activeQuery)
                     val resolve: suspend (OrbitWatchSelection, OrbitEpisodeItem) -> PreparedPlaybackNext = { current, target ->
-                        val nextContext = nextBaseContext.copy(target = mapOf(parentKey to video.id, chapterKey to target.id))
-                        val resolved = withContext(Dispatchers.IO) { repository.playback(repository.invoke(config, nextContext)) }
+                        val nextContext = nextBaseContext.copy(target = playbackTarget(target))
+                        val resolved = withContext(Dispatchers.IO) {
+                            val raw = repository.invoke(config, nextContext)
+                            if (directDetail) parseOrbitDirectPlayback(raw) else repository.playback(raw)
+                        }
                         PreparedPlaybackNext(PlaybackEpisode(resolved.title.ifBlank { target.title }, resolved.url), current.copy(episode = target))
                     }
                     val resolver: suspend (OrbitWatchSelection) -> PreparedPlaybackNext? = { current ->

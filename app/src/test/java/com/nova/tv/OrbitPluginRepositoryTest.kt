@@ -63,6 +63,13 @@ class OrbitPluginRepositoryTest {
         assertEquals("duanju", next?.channelId)
     }
 
+    @Test fun directDetailUsesVideoMediaAndRequiresSafeAddress() {
+        val detail = JSONObject("""{"items":[{"title":"示例","url":"https://example.test/page","media":[{"type":"image","url":"https://example.test/image.jpg"},{"type":"video","url":"https://example.test/video.m3u8"}]}]}""")
+        assertEquals("https://example.test/video.m3u8", parseOrbitDirectPlayback(detail).url)
+        assertEquals("https://example.test/direct.m3u8", parseOrbitDirectPlayback(JSONObject("""{"items":[{"url":"https://example.test/direct.m3u8"}]}""")).url)
+        assertThrows(OrbitApiException::class.java) { parseOrbitDirectPlayback(JSONObject("""{"items":[{"url":"http://example.test/video"}]}""")) }
+    }
+
     @Test fun mapsChapterScopeAndPlaybackAddressFromObservedSchema() {
         val episodes = parseOrbitEpisodes(business("chapters.json"))
         assertEquals("chapter-001", episodes.first().id)
