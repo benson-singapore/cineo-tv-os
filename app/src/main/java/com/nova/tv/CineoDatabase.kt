@@ -98,7 +98,7 @@ class CineoDatabase(context: Context) : SQLiteOpenHelper(
         "sync_outbox", arrayOf("entity", "sync_key", "updated_at", "deleted", "payload_json", "generation", "baseline_at"),
         if (generation != null && baselineAt != null) "generation = ? AND baseline_at >= ?" else null,
         if (generation != null && baselineAt != null) arrayOf(generation.toString(), baselineAt.toString()) else null,
-        null, null, "updated_at ASC", limit.coerceIn(1, 500).toString()
+        null, null, "updated_at ASC", limit.coerceAtLeast(1).toString()
     ).use { cursor -> buildList {
         while (cursor.moveToNext()) {
             val raw = cursor.getString(4)
@@ -152,8 +152,11 @@ class CineoDatabase(context: Context) : SQLiteOpenHelper(
         db.beginTransaction()
         try {
             envelopes.forEach { item ->
-                db.delete("sync_outbox", "entity = ? AND sync_key = ? AND updated_at = ?",
-                    arrayOf(item.entity, item.key, item.updatedAt.toString()))
+                val current = readSyncOutboxItem(item.entity, item.key)
+                if (current == item) {
+                    db.delete("sync_outbox", "entity = ? AND sync_key = ? AND updated_at = ?",
+                        arrayOf(item.entity, item.key, item.updatedAt.toString()))
+                }
             }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
@@ -172,7 +175,12 @@ class CineoDatabase(context: Context) : SQLiteOpenHelper(
     )
 
     fun clearSyncBindingState() {
+        clearWatchConfirmations()
         writeSyncState(mapOf("bound_at" to "", "cursor" to "0", "generation" to "0", "baseline_at" to "0"))
+    }
+
+    fun clearWatchConfirmations() {
+        writableDatabase.delete("sync_state", "state_key LIKE ? OR state_key LIKE ?", arrayOf("watch_confirmed:%", "watch_snapshot_hold:%"))
     }
 
     fun clearHubManagedSettings() {
@@ -211,6 +219,9 @@ class CineoDatabase(context: Context) : SQLiteOpenHelper(
             put("updated_at", updatedAt); put("deleted", if (deleted) 1 else 0)
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
+
+    internal fun deleteEpisodeProgress(key: String, updatedAt: Long): Int =
+        writableDatabase.delete("episode_progress", "progress_key = ? AND updated_at <= ?", arrayOf(key, updatedAt.toString()))
 
     internal fun readEpisodeProgress(key: String): SyncEnvelope? = readableDatabase.query(
         "episode_progress", arrayOf("record_json", "updated_at", "deleted"), "progress_key = ?", arrayOf(key), null, null, null, "1"

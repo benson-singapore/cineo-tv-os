@@ -12,6 +12,8 @@ import org.json.JSONObject
 import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.min
 
+private class UnresolvedWatchOutbox : IllegalStateException()
+
 internal class HubSyncEngine(
     context: Context,
     private val repository: MacCmsRepository,
@@ -38,6 +40,7 @@ internal class HubSyncEngine(
         val normalizedPin = pin.filter(Char::isDigit)
         require(normalizedPin.length == 8) { "请输入完整的 8 位 PIN" }
         val result = api.bind(baseUrl, normalizedPin, android.os.Build.MODEL.orEmpty())
+        database.clearWatchConfirmations()
         credentials.save(baseUrl.trim().trimEnd('/'), result.getString("device_id"), result.getString("device_token"))
         database.writeSyncState(mapOf("bound_at" to System.currentTimeMillis().toString(), "device_id" to result.getString("device_id"), "generation" to "0", "baseline_at" to "0"))
         repository.enqueueLocalSyncSnapshot()
@@ -58,10 +61,13 @@ internal class HubSyncEngine(
         val status = try {
             mutex.withLock { withContext(Dispatchers.IO) {
                 try {
-                    pushPending(trigger)
+                    val held = pushPending(trigger)
+                    if (held > 0) return@withContext SyncStatus("推送部分完成", "已保留 $held 条身份不明确或存在关联冲突的待同步记录")
                     failureCount = 0
                     retryJob?.cancel()
                     SyncStatus("已推送", "待推送记录已发送")
+                } catch (_: UnresolvedWatchOutbox) {
+                    SyncStatus("推送受阻", "旧观看记录的剧集身份不明确，待同步记录已保留")
                 } catch (failure: HubApiException) {
                     when (val reason = failure.failure) {
                         HubFailure.DeviceRevoked -> {
@@ -136,16 +142,18 @@ internal class HubSyncEngine(
         }
         return try {
             mutex.withLock { withContext(Dispatchers.IO) {
-                repository.enqueueLocalSyncSnapshot()
+                val skippedHistory = repository.enqueueLocalSyncSnapshot()
                 val baselineAt = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
                 val pending = database.syncOutboxCount(credentials.generation, baselineAt)
                 var sent = 0
                 var ignored = 0
                 var failed = 0
                 while (true) {
-                    val current = database.readSyncOutbox(500, credentials.generation, baselineAt).filter { it.entity != "setting" }
+                    val current = database.readSyncOutbox(Int.MAX_VALUE, credentials.generation, baselineAt).filter { it.entity != "setting" }
                     if (current.isEmpty()) break
-                    val batch = boundedSyncBatch(current)
+                    val (safe, held) = partitionWatchOutbox(current)
+                    if (safe.isEmpty()) return@withContext SyncStatus("推送部分完成", "成功 $sent 条；被忽略 $ignored 条；保留 ${held.size} 条待同步记录；另跳过 $skippedHistory 条本地观看记录")
+                    val batch = boundedSyncBatch(safe)
                     if (batch.isEmpty()) return@withContext SyncStatus("推送失败", "单条记录超过 1 MB 请求限制")
                     val reply = try {
                         api.push(batch, trigger).also(::requireSuccess)
@@ -165,14 +173,16 @@ internal class HubSyncEngine(
                         return@withContext SyncStatus("推送失败", "成功 $sent 条；被忽略 $ignored 条；失败 $failed 条：$message")
                     }
                     val data = reply.envelope.data
-                    val accepted = data?.optJSONArray("accepted")?.length() ?: batch.size
-                    val batchIgnored = data?.optJSONArray("ignored")?.length() ?: 0
+                    val counts = confirmedSyncCounts(data, batch)
+                        ?: return@withContext SyncStatus("推送失败", "服务器未确认全部记录，待同步记录已保留")
+                    val (accepted, batchIgnored) = counts
                     sent += accepted
                     ignored += batchIgnored
+                    repository.recordConfirmedWatch(acceptedWatchEnvelopes(data, batch))
                     database.removeSyncOutbox(batch)
                     onProgress(sent + ignored, pending)
                 }
-                SyncStatus("推送完成", "成功 $sent 条；被忽略 $ignored 条；失败 $failed 条")
+                fullPushCompletion(sent, ignored, failed, skippedHistory)
             } }
         } catch (failure: Exception) {
             SyncStatus("推送失败", failure.message?.take(160) ?: "推送全部失败")
@@ -204,13 +214,14 @@ internal class HubSyncEngine(
         }
     }
 
-    private fun scheduleRetry(retryAfterSeconds: Long?) {
+    private fun scheduleRetry(retryAfterSeconds: Long?, item: SyncEnvelope? = null) {
         retryJob?.cancel()
         val delayMillis = nextRetryDelayMillis(retryAfterSeconds)
         database.writeSyncState(mapOf("progress_next_allowed_at" to (System.currentTimeMillis() + delayMillis).toString()))
         retryJob = retryScope.launch {
             delay(delayMillis)
-            pushOutbox(SyncTrigger.RETRY)
+            if (item == null) pushOutbox(SyncTrigger.RETRY)
+            else pushSingle(item, SyncTrigger.RETRY)
         }
     }
 
@@ -237,7 +248,8 @@ internal class HubSyncEngine(
         database.writeAppSettings(mapOf("progress_push_interval_seconds" to seconds.toString()))
     }
 
-    suspend fun syncProgressIfDue() {
+    suspend fun syncProgressIfDue(key: String?) {
+        if (key == null) return
         if (!credentials.isBound || credentials.revoked) return
         val seconds = database.readAppSetting("progress_push_interval_seconds")?.toIntOrNull()
         val interval = progressIntervalMillis(seconds)
@@ -245,8 +257,9 @@ internal class HubSyncEngine(
         val last = database.readSyncState("last_progress_upload_at").toLongOrNull() ?: 0L
         val nextAllowedAt = database.readSyncState("progress_next_allowed_at").toLongOrNull() ?: 0L
         if (!progressPushAllowed(now, last, interval, nextAllowedAt)) return
-        val progress = database.readLatestProgressOutbox(credentials.generation,
-            database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L) ?: return
+        val baseline = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
+        val progress = partitionWatchOutbox(database.readSyncOutbox(Int.MAX_VALUE, credentials.generation, baseline))
+            .first.firstOrNull { it.entity == "progress" && it.key == key } ?: return
         val currentPosition = (progress.payload?.get("position_ms") as? Number)?.toLong() ?: progress.updatedAt
         val lastUploaded = database.readSyncState("last_uploaded_progress_value:${progress.key}").toLongOrNull()
         if (!progressChanged(lastUploaded, currentPosition)) return
@@ -259,6 +272,7 @@ internal class HubSyncEngine(
     }
 
     private suspend fun pushSingle(item: SyncEnvelope, trigger: SyncTrigger): Boolean {
+        if (!hasTrustedWatchIdentity(item)) return false
         if (!isSyncing.compareAndSet(false, true)) {
             pendingSinglePushes.put(item, trigger)
             requestPendingPush()
@@ -266,8 +280,14 @@ internal class HubSyncEngine(
         }
         return try {
             mutex.withLock { withContext(Dispatchers.IO) {
+                val baseline = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
+                val queued = database.readSyncOutbox(Int.MAX_VALUE, credentials.generation, baseline)
+                if (partitionWatchOutbox(queued + item).first.none { it === item }) return@withContext false
+                if (database.readSyncOutboxItem(item.entity, item.key) != item) return@withContext false
                 val reply = api.push(listOf(item), trigger)
                 requireSuccess(reply)
+                if (confirmedSyncCounts(reply.envelope.data, listOf(item)) == null) return@withContext false
+                repository.recordConfirmedWatch(acceptedWatchEnvelopes(reply.envelope.data, listOf(item)))
                 database.removeSyncOutbox(listOf(item))
                 true
             } }
@@ -278,12 +298,12 @@ internal class HubSyncEngine(
             } else {
                 val retryAfter = (failure.failure as? HubFailure.Api)?.retryAfterSeconds
                 failureCount++
-                scheduleRetry(retryAfter)
+                if (item.entity != "progress") scheduleRetry(retryAfter, item)
             }
             false
         } catch (_: Exception) {
             failureCount++
-            scheduleRetry(null)
+            if (item.entity != "progress") scheduleRetry(null, item)
             false
         } finally {
             isSyncing.set(false)
@@ -309,14 +329,16 @@ internal class HubSyncEngine(
         database.clearHubManagedSettings()
     }
 
-    suspend fun syncAfterPlaybackPause() = pushLatestProgress()
+    suspend fun syncAfterPlaybackPause(key: String?) = pushLatestProgress(key)
 
-    suspend fun syncAfterPlaybackExit() = pushLatestProgress()
+    suspend fun syncAfterPlaybackExit(key: String?) = pushLatestProgress(key)
 
-    private suspend fun pushLatestProgress() {
+    private suspend fun pushLatestProgress(key: String?) {
+        if (key == null) return
         if (!credentials.isBound || credentials.revoked) return
         val baselineAt = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
-        val progress = database.readLatestProgressOutbox(credentials.generation, baselineAt) ?: return
+        val progress = partitionWatchOutbox(database.readSyncOutbox(Int.MAX_VALUE, credentials.generation, baselineAt))
+            .first.firstOrNull { it.entity == "progress" && it.key == key } ?: return
         val position = (progress.payload?.get("position_ms") as? Number)?.toLong() ?: progress.updatedAt
         if (pushSingle(progress, SyncTrigger.AUTO_PROGRESS)) {
             database.writeSyncState(mapOf("last_progress_upload_at" to System.currentTimeMillis().toString(),
@@ -324,18 +346,31 @@ internal class HubSyncEngine(
         }
     }
 
-    private suspend fun pushPending(trigger: SyncTrigger) {
+    private suspend fun pushPending(trigger: SyncTrigger): Int {
         while (true) {
             val baselineAt = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
-            val outbox = database.readSyncOutbox(500, credentials.generation, baselineAt)
+            val outbox = database.readSyncOutbox(Int.MAX_VALUE, credentials.generation, baselineAt)
                 .filter { it.entity != "setting" }
-            if (outbox.isEmpty()) return
-            val batch = boundedSyncBatch(outbox)
+            if (outbox.isEmpty()) return 0
+            val (safe, held) = partitionWatchOutbox(outbox)
+            if (safe.isEmpty()) return held.size
+            val batch = boundedSyncBatch(safe)
             if (batch.isEmpty()) throw IllegalStateException("同步记录超出请求大小限制")
             val reply = api.push(batch, trigger)
             requireSuccess(reply)
+            check(confirmedSyncCounts(reply.envelope.data, batch) != null) { "服务器未确认全部记录，待同步记录已保留" }
+            repository.recordConfirmedWatch(acceptedWatchEnvelopes(reply.envelope.data, batch))
             database.removeSyncOutbox(batch)
         }
+    }
+
+    private fun acceptedWatchEnvelopes(data: JSONObject?, batch: List<SyncEnvelope>): List<SyncEnvelope> {
+        val accepted = data?.optJSONArray("accepted") ?: return emptyList()
+        val keys = (0 until accepted.length()).mapNotNull { index ->
+            val row = accepted.optJSONObject(index) ?: return@mapNotNull null
+            row.optString("entity") to row.optString("key")
+        }.toSet()
+        return batch.filter { (it.entity to it.key) in keys }
     }
 
     private suspend fun pullPages(trigger: SyncTrigger) {
@@ -347,6 +382,7 @@ internal class HubSyncEngine(
             val items = data.optJSONArray("items") ?: JSONArray()
             val envelopes = (0 until items.length()).map { items.getJSONObject(it).toSyncEnvelope() }
             repository.applyRemoteSyncEnvelopes(envelopes, credentials.deviceId.orEmpty())
+            repository.recordConfirmedWatch(envelopes)
             val pageHasMore = data.optBoolean("has_more")
             val nextCursor = nextPageCursor(cursor, data)
             cursor = if (nextCursor != null) nextCursor else data.optLong("next_seq", cursor)
@@ -356,51 +392,58 @@ internal class HubSyncEngine(
         }
     }
 
-    private suspend fun rebuildSnapshot(trigger: SyncTrigger) {
+    internal suspend fun rebuildSnapshot(
+        trigger: SyncTrigger,
+        fetchPage: (Long, Long, Int, SyncTrigger) -> HubHttpReply = api::rebuild
+    ) {
         val knownGeneration = credentials.generation
-        var cursor = 0L
-        var snapshotSeq: Long? = null
-        var snapshotGeneration: Long? = null
-        var baselineAt: Long? = null
-        var finalCursor = 0L
-        while (true) {
-            val reply = api.rebuild(knownGeneration, cursor, 500, trigger)
-            requireSuccess(reply)
-            val data = reply.envelope.data ?: JSONObject()
-            val pageSnapshot = data.optLong("snapshot_seq", data.optLong("next_seq", cursor))
-            val pageGeneration = data.optLong("generation", knownGeneration + 1)
-            if (snapshotSeq == null) {
-                snapshotSeq = pageSnapshot
-                snapshotGeneration = pageGeneration
-                baselineAt = System.currentTimeMillis()
-                database.writeSyncState(mapOf(
-                    "generation" to pageGeneration.toString(),
-                    "baseline_at" to baselineAt.toString()
-                ))
-            } else {
-                require(snapshotSeq == pageSnapshot && snapshotGeneration == pageGeneration) {
-                    "snapshot baseline changed during pagination"
+        var lastFailure: HubApiException? = null
+        repeat(3) {
+            var cursor = 0L
+            var snapshotSeq: Long? = null
+            var snapshotGeneration: Long? = null
+            val snapshotBuffer = WatchSnapshotBuffer()
+            try {
+                while (true) {
+                    val reply = fetchPage(knownGeneration, cursor, 500, trigger)
+                    requireSuccess(reply)
+                    val data = reply.envelope.data ?: JSONObject()
+                    val pageSnapshot = data.optLong("snapshot_seq", data.optLong("next_seq", cursor))
+                    val pageGeneration = data.optLong("generation", knownGeneration + 1)
+                    if (snapshotSeq == null) {
+                        snapshotSeq = pageSnapshot
+                        snapshotGeneration = pageGeneration
+                    } else {
+                        require(snapshotSeq == pageSnapshot && snapshotGeneration == pageGeneration) {
+                            "snapshot baseline changed during pagination"
+                        }
+                    }
+                    val items = data.optJSONArray("items") ?: JSONArray()
+                    val next = nextPageCursor(cursor, data)
+                    snapshotBuffer.addPage((0 until items.length()).map { items.getJSONObject(it).toSyncEnvelope() }, next != null)
+                    if (next == null) {
+                        cursor = data.optLong("next_seq", pageSnapshot)
+                        break
+                    }
+                    require(next > cursor) { "snapshot cursor did not advance" }
+                    cursor = next
                 }
+                val baselineAt = System.currentTimeMillis()
+                // Quarantine old queued operations only after a complete snapshot.
+                database.writeSyncState(mapOf("generation" to snapshotGeneration.toString(), "baseline_at" to baselineAt.toString()))
+                val snapshot = snapshotBuffer.completeSnapshot()
+                repository.applyRemoteSyncEnvelopes(snapshot, credentials.deviceId.orEmpty(), isSnapshot = true)
+                repository.recordConfirmedWatch(snapshot)
+                repository.reconcileConfirmedWatchSnapshot(snapshot)
+                credentials.writeCursor(cursor, snapshotGeneration ?: knownGeneration + 1)
+                database.writeSyncState(mapOf("cursor" to cursor.toString()))
+                return
+            } catch (failure: HubApiException) {
+                if (failure.failure != HubFailure.ResyncRequired) throw failure
+                lastFailure = failure
             }
-            val items = data.optJSONArray("items") ?: JSONArray()
-            repository.applyRemoteSyncEnvelopes(
-                (0 until items.length()).map { items.getJSONObject(it).toSyncEnvelope() },
-                credentials.deviceId.orEmpty(),
-                isSnapshot = true
-            )
-            finalCursor = data.optLong("next_seq", pageSnapshot)
-            val next = nextPageCursor(cursor, data)
-            if (next == null) break
-            cursor = next
         }
-        val completedBaselineAt = requireNotNull(baselineAt)
-        credentials.writeCursor(finalCursor, snapshotGeneration ?: knownGeneration + 1)
-        database.writeSyncState(mapOf(
-            "cursor" to finalCursor.toString(),
-            "generation" to (snapshotGeneration ?: knownGeneration + 1).toString(),
-            "baseline_at" to completedBaselineAt.toString()
-        ))
-        repository.enqueueLocalSyncSnapshot()
+        throw lastFailure ?: IllegalStateException("快照重建失败")
     }
 
     private suspend fun applyCloudSettings(trigger: SyncTrigger) {

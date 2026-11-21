@@ -207,6 +207,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
     var playbackVideo by remember { mutableStateOf<RemoteVideo?>(null) }
     var playbackTitle by remember { mutableStateOf("") }
     var playbackLine by remember { mutableStateOf("") }
+    var currentProgressKey by remember { mutableStateOf<String?>(null) }
     var playbackEpisodes by remember { mutableStateOf<List<PlaybackEpisode>>(emptyList()) }
     var playbackStartPositionMs by remember { mutableLongStateOf(0L) }
     val playbackScope = rememberCoroutineScope()
@@ -220,7 +221,37 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
             }
             if (playbackVideo?.id == video.id && playbackLine == lineName && playbackEpisode?.url == currentEpisode.url && fullEpisodeList.isNotEmpty()) {
                 playbackEpisodes = fullEpisodeList
+                // A legacy history record can regain its position only from
+                // a uniquely matching actual URL in the loaded line.
+                if (currentEpisode.lineEpisodeIndex == null && currentEpisode.url.isNotBlank()) {
+                    fullEpisodeList.singleOrNull { it.url == currentEpisode.url && it.lineEpisodeIndex != null }
+                        ?.let { playbackEpisode = it }
+                }
             }
+        }
+    }
+    fun resumeWatch(record: WatchRecord, resetCompleted: Boolean) {
+        fun start(episode: PlaybackEpisode, episodes: List<PlaybackEpisode>) {
+            playbackVideo = record.video
+            playbackTitle = record.video.title
+            playbackLine = record.lineName
+            playbackEpisodes = episodes
+            playbackEpisode = episode
+            playbackStartPositionMs = if (resetCompleted && record.isComplete) 0L else record.positionMs
+        }
+        if (record.episode.url.isNotBlank()) {
+            start(record.episode, listOf(record.episode))
+            loadPlaybackEpisodes(record.video, record.lineName, record.episode)
+            return
+        }
+        playbackScope.launch {
+            val detail = try { videoRepository.detail(record.video) } catch (_: Exception) { null }
+            val match = detail?.let { resolveSyncedEpisode(record, it) }
+            if (match == null) {
+                android.widget.Toast.makeText(context, "无法确认原播放线路和剧集，请打开详情选择", android.widget.Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            start(match.second, match.first.episodes)
         }
     }
     val preserveHomeHeroPositionOnMenuEntry = remember { mutableStateOf(false) }
@@ -256,7 +287,10 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
             hadPlayback = true
         } else if (hadPlayback) {
             hadPlayback = false
-            if (orbitPlayback == null) playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit() }
+            if (orbitPlayback == null) {
+                val key = currentProgressKey
+                playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit(key) }
+            }
             orbitPlayback = null
             orbitNextResolver = null
             val fallbackRequester = when {
@@ -313,15 +347,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                         detailReturnFocusRequester = requester
                         remoteDetail = video
                     },
-                    onResume = { record ->
-                        playbackVideo = record.video
-                        playbackTitle = record.video.title
-                        playbackLine = record.lineName
-                        playbackEpisodes = listOf(record.episode)
-                        playbackEpisode = record.episode
-                        playbackStartPositionMs = if (record.isComplete) 0L else record.positionMs
-                        loadPlaybackEpisodes(record.video, record.lineName, record.episode)
-                    },
+                    onResume = { record -> resumeWatch(record, resetCompleted = true) },
                     onOpenList = { section = it },
                     onOpenSection = { section = it },
                     onOpenConfig = { section = "配置" }
@@ -390,15 +416,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                         detailReturnFocusRequester = requester
                         remoteDetail = video
                     },
-                    onResume = { record ->
-                        playbackVideo = record.video
-                        playbackTitle = record.video.title
-                        playbackLine = record.lineName
-                        playbackEpisodes = listOf(record.episode)
-                        playbackEpisode = record.episode
-                        playbackStartPositionMs = record.positionMs
-                        loadPlaybackEpisodes(record.video, record.lineName, record.episode)
-                    }
+                    onResume = { record -> resumeWatch(record, resetCompleted = false) }
                 )
                 movie != null -> {
                 LazyColumn(contentPadding = PaddingValues(bottom = 35.dp)) {
@@ -502,8 +520,13 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                         playbackLine = line.name
                         playbackEpisodes = line.episodes
                         playbackStartPositionMs = videoRepository.watchRecord(video)
-                            ?.takeIf { !it.isComplete && matchingHistoryEpisode(it, line.episodes)?.url == episode.url }
-                            ?.positionMs ?: 0L
+                            ?.takeIf { record ->
+                                !record.isComplete && if (record.episode.url.isBlank()) {
+                                    record.video.sourceId == video.sourceId && record.video.remoteId == video.remoteId &&
+                                        record.lineName == line.name && record.episode.lineEpisodeIndex != null &&
+                                        record.episode.lineEpisodeIndex == episode.lineEpisodeIndex
+                                } else matchingHistoryEpisode(record, line.episodes)?.url == episode.url
+                            }?.positionMs ?: 0L
                         playbackEpisode = episode
                     }
                 )
@@ -524,6 +547,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                 orbitSelection = playingOrbit,
                 orbitNextResolver = orbitNextResolver,
                 onAutoNext = { next ->
+                    currentProgressKey = null
                     next.orbitSelection?.let { orbitHistory.save(it, 0L, 0L) }
                     orbitPlayback = next.orbitSelection
                     playbackStartPositionMs = 0L
@@ -534,6 +558,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                 exitOnBack = playingOrbit != null,
                 onPlaybackError = { if (playingOrbit != null) invalidateOrbitPlayback?.invoke() },
                 onSwitchSource = { sourceVideo, sourceLine, sourceEpisode, position ->
+                    currentProgressKey = null
                     orbitPlayback = null
                     orbitNextResolver = null
                     playbackVideo = sourceVideo
@@ -544,7 +569,11 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     playbackEpisode = sourceEpisode
                 },
                 onExit = {
-                    if (orbitPlayback == null) playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit() }
+                    if (orbitPlayback == null) {
+                        val key = currentProgressKey
+                        currentProgressKey = null
+                        playbackScope.launch { hubSyncEngine.syncAfterPlaybackExit(key) }
+                    }
                     playbackEpisode = null
                     playbackVideo = null
                     playbackEpisodes = emptyList()
@@ -553,17 +582,25 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     contentRevision++
                 },
                 onSelectEpisode = { selectedEpisode ->
+                    currentProgressKey = null
                     playbackStartPositionMs = 0L
                     playbackEpisode = selectedEpisode
                 },
                 onProgress = { position, duration ->
                     if (playingOrbit != null) orbitHistory.save(playingOrbit, position, duration)
                     else {
+                        val key = videoRepository.playbackProgressSyncKey(playingVideo, playingLine, playingEpisode)
+                        currentProgressKey = key
                         videoRepository.saveWatchProgress(playingVideo, playingLine, playingEpisode, position, duration)
-                        playbackScope.launch { hubSyncEngine.syncProgressIfDue() }
+                        playbackScope.launch { hubSyncEngine.syncProgressIfDue(key) }
                     }
                 },
-                onPause = { if (orbitPlayback == null) playbackScope.launch { hubSyncEngine.syncAfterPlaybackPause() } }
+                onPause = {
+                    if (orbitPlayback == null) {
+                        val key = videoRepository.playbackProgressSyncKey(playingVideo, playingLine, playingEpisode)
+                        playbackScope.launch { hubSyncEngine.syncAfterPlaybackPause(key) }
+                    }
+                }
             )
         }
         // Navigation floats over the artwork without an opaque panel or divider.

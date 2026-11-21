@@ -23,6 +23,10 @@ internal class HubSyncActions(
     }
 }
 
+internal fun fullPushCompletion(sent: Int, ignored: Int, failed: Int, skipped: Int): SyncStatus =
+    if (skipped > 0) SyncStatus("推送部分完成", "成功 $sent 条；被忽略 $ignored 条；失败 $failed 条；跳过 $skipped 条观看记录（来源、剧集身份或待同步记录冲突），本地记录已保留")
+    else SyncStatus("推送完成", "成功 $sent 条；被忽略 $ignored 条；失败 $failed 条")
+
 internal data class PendingSinglePush(val envelope: SyncEnvelope, val trigger: SyncTrigger)
 
 internal class PendingSinglePushes {
@@ -79,6 +83,84 @@ internal data class SyncEnvelope(
     val generation: Long? = null,
     val baselineAt: Long? = null
 )
+
+/** Old unmarked watch envelopes may contain title-guessed episode indices.
+ * Retain them for explicit resolution rather than sending or discarding them. */
+internal fun hasTrustedWatchIdentity(item: SyncEnvelope): Boolean {
+    if (item.entity !in setOf("history", "progress")) return true
+    if (item.deleted) return false
+    val payload = item.payload ?: return false
+    if (payload["cineo_index_base"] != 0) return false
+    val sourceApi = payload["source_api"] as? String ?: return false
+    val video = payload["video"] as? Map<*, *> ?: return false
+    val vod = (video["remoteId"] as? String)?.takeIf { it.isNotBlank() } ?: return false
+    val line = (payload["line_name"] as? String)?.takeIf { it.isNotBlank() } ?: return false
+    val index = (payload["episode_index"] as? Int)?.takeIf { it >= 0 } ?: return false
+    val videoKey = runCatching { "${hubSourceKey(sourceApi)}:${syncEncode(vod)}" }.getOrNull() ?: return false
+    return if (item.entity == "history") item.key == videoKey
+        else item.key == watchProgressSyncKey(videoKey, line, PlaybackEpisode("", "", index))
+}
+
+// Preserve uncertain old entries and prevent a different key for the same
+// film from bypassing a pending deletion or ambiguous history.
+internal fun partitionWatchOutbox(items: List<SyncEnvelope>): Pair<List<SyncEnvelope>, List<SyncEnvelope>> {
+    val uncertain = items.filter { !hasTrustedWatchIdentity(it) }
+    fun filmKey(item: SyncEnvelope): String? {
+        val parts = item.key.split(":")
+        return if (parts.size in setOf(2, 4) && parts[0].isNotBlank() && parts[1].isNotBlank())
+            "${parts[0]}:${parts[1]}" else null
+    }
+    val unknown = uncertain.any { filmKey(it) == null }
+    val heldFilms = uncertain.mapNotNull(::filmKey).toSet()
+    return items.partition { item ->
+        hasTrustedWatchIdentity(item) && (item.entity !in setOf("history", "progress") ||
+            (!unknown && filmKey(item) !in heldFilms))
+    }
+}
+
+internal class WatchSnapshotBuffer {
+    private val pages = mutableListOf<List<SyncEnvelope>>()
+    private var completed = false
+    fun addPage(items: List<SyncEnvelope>, hasMore: Boolean) {
+        check(!completed)
+        pages.add(items)
+        completed = !hasMore
+    }
+    fun completeSnapshot(): List<SyncEnvelope> {
+        check(completed) { "snapshot incomplete" }
+        return pages.flatten()
+    }
+}
+
+internal fun watchFilmKey(key: String): String? {
+    val parts = key.split(":")
+    return if (parts.size in setOf(2, 4) && parts[0].isNotBlank() && parts[1].isNotBlank())
+        "${parts[0]}:${parts[1]}" else null
+}
+
+internal fun mayRemoveSyncedWatch(
+    filmKey: String, localUpdatedAt: Long, confirmedUpdatedAt: Long?,
+    snapshotFilms: Set<String>, pending: List<SyncEnvelope>
+): Boolean {
+    if (confirmedUpdatedAt == null || localUpdatedAt != confirmedUpdatedAt || filmKey in snapshotFilms) return false
+    val pendingWatch = pending.filter { it.entity == "history" || it.entity == "progress" }
+    return pendingWatch.none { watchFilmKey(it.key) == null || watchFilmKey(it.key) == filmKey }
+}
+
+internal fun confirmedSyncCounts(data: JSONObject?, batch: List<SyncEnvelope>): Pair<Int, Int>? {
+    val accepted = data?.optJSONArray("accepted") ?: return null
+    val ignored = data.optJSONArray("ignored") ?: return null
+    val expected = batch.map { it.entity to it.key }.toSet()
+    val found = mutableSetOf<Pair<String, String>>()
+    for (array in listOf(accepted, ignored)) {
+        for (i in 0 until array.length()) {
+            val row = array.optJSONObject(i) ?: return null
+            val pair = row.optString("entity") to row.optString("key")
+            if (pair !in expected || !found.add(pair)) return null
+        }
+    }
+    return if (found == expected && expected.size == batch.size) accepted.length() to ignored.length() else null
+}
 
 internal sealed class HubFailure {
     data object ResyncRequired : HubFailure()

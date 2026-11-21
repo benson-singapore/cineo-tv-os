@@ -41,11 +41,45 @@ data class RemoteVideo(
     val year: String,
     val description: String,
     val posterUrl: String,
-    val rating: String
+    val rating: String,
+    val episodeBadge: String = ""
 )
 
-data class PlaybackEpisode(val title: String, val url: String)
+data class PlaybackEpisode(val title: String, val url: String, val lineEpisodeIndex: Int? = null)
+
+/** The index is the position in the source's raw line, before invalid entries
+ * are filtered, matching the Flutter MacCMS parser. */
+internal fun parseLineEpisodes(group: String, resolveAddress: (String) -> String): List<PlaybackEpisode> =
+    group.split('#').mapIndexedNotNull { index, raw ->
+        val entry = raw.trim()
+        if (entry.isEmpty()) return@mapIndexedNotNull null
+        val separator = entry.indexOf('$')
+        val title = if (separator < 0) entry else entry.substring(0, separator).trim()
+        val address = if (separator < 0) entry else entry.substring(separator + 1).trim()
+        if (address.isEmpty()) null else PlaybackEpisode(
+            title.ifEmpty { "第 ${index + 1} 集" }, resolveAddress(address), index
+        )
+    }
+
+internal fun watchProgressSyncKey(videoKey: String, lineName: String, episode: PlaybackEpisode): String? {
+    val index = episode.lineEpisodeIndex ?: return null
+    if (index < 0 || lineName.isBlank() || videoKey.isBlank()) return null
+    return "$videoKey:${syncEncode(lineName)}:$index"
+}
 data class PlaybackLine(val name: String, val episodes: List<PlaybackEpisode>)
+
+internal fun disableAmbiguousLineIndices(lines: List<PlaybackLine>): List<PlaybackLine> {
+    val duplicates = lines.groupingBy { it.name }.eachCount().filterValues { it > 1 }.keys
+    return lines.map { line ->
+        if (line.name in duplicates) line.copy(episodes = line.episodes.map { it.copy(lineEpisodeIndex = null) })
+        else line
+    }
+}
+
+internal fun episodeFromHistory(json: JSONObject): PlaybackEpisode = PlaybackEpisode(
+    json.optString("episodeTitle"), json.optString("episodeUrl"),
+    (json.opt("lineEpisodeIndex") as? Int)?.takeIf { it >= 0 }
+)
 data class RemoteVideoDetail(val video: RemoteVideo, val lines: List<PlaybackLine>)
 data class SearchResult(val videos: List<RemoteVideo>, val errors: List<String>)
 data class VideoCategory(val id: String, val name: String, val parentId: String? = null)
@@ -61,6 +95,18 @@ data class WatchRecord(
     val progress: Float get() = if (durationMs <= 0) 0f else (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
     val isComplete: Boolean get() = durationMs > 0 && positionMs >= durationMs - 45_000
 }
+/** Resolve a synced record only with the exact source, film, unique line and
+ * persisted raw line index. No stream URL is transferred by the Hub. */
+internal fun resolveSyncedEpisode(record: WatchRecord, detail: RemoteVideoDetail): Pair<PlaybackLine, PlaybackEpisode>? {
+    if (record.video.sourceId.isBlank() || record.video.remoteId.isBlank() ||
+        record.video.sourceId != detail.video.sourceId || record.video.remoteId != detail.video.remoteId) return null
+    val index = record.episode.lineEpisodeIndex ?: return null
+    if (index < 0 || record.lineName.isBlank()) return null
+    val line = detail.lines.filter { it.name == record.lineName }.singleOrNull() ?: return null
+    val episode = line.episodes.filter { it.lineEpisodeIndex == index && it.url.isNotBlank() }.singleOrNull() ?: return null
+    return line to episode
+}
+
 data class ImportResult(val imported: Int, val skipped: Int, val error: String? = null)
 private data class SourceSearchReply(val videos: List<RemoteVideo>, val error: String? = null)
 
@@ -85,6 +131,34 @@ internal fun matchingHistoryEpisode(record: WatchRecord, episodes: List<Playback
     return episodes.singleOrNull()?.takeIf {
         number == null && !Regex("\\d+").containsMatchIn(record.episode.title)
     }
+}
+
+/** Resolve media only from an exact, unambiguous source/remote ID in the
+ * envelope key. Older Flutter payloads may contain just title and poster. */
+internal fun decodeHubVideo(key: String, payload: JSONObject, sources: List<VideoSource>): Pair<RemoteVideo, VideoSource>? {
+    val parts = key.split(':')
+    if (parts.size != 2 && parts.size != 4) return null
+    val sourceKey = parts[0]
+    val remoteId = runCatching { java.net.URLDecoder.decode(parts[1], Charsets.UTF_8.name()) }.getOrNull() ?: return null
+    if (remoteId.isBlank() || syncEncode(remoteId) != parts[1]) return null
+    val source = sources.filter { runCatching { hubSourceKey(it.api) == sourceKey }.getOrDefault(false) }.singleOrNull() ?: return null
+    val api = payload.optString("source_api")
+    if (api.isNotBlank() && runCatching { hubSourceKey(api) }.getOrNull() != sourceKey) return null
+    val raw = payload.optJSONObject("video") ?: payload
+    val suppliedSource = payload.optString("source_key").ifBlank { raw.optString("sourceKey") }
+    if (suppliedSource.isNotBlank() && suppliedSource != sourceKey) return null
+    val suppliedId = raw.optString("remoteId")
+    if (suppliedId.isNotBlank() && suppliedId != remoteId) return null
+    val title = raw.optString("title").ifBlank { payload.optString("title") }.takeIf { it.isNotBlank() } ?: return null
+    val video = RemoteVideo(
+        id = "${source.id}:$remoteId", sourceId = source.id, sourceName = source.name,
+        remoteId = remoteId, title = title,
+        category = raw.optString("category").ifBlank { payload.optString("category") },
+        year = raw.optString("year"), description = raw.optString("description"),
+        posterUrl = raw.optString("posterUrl"), rating = raw.optString("rating"),
+        episodeBadge = raw.optString("episodeBadge")
+    )
+    return video to source
 }
 
 /** Local-first MacCMS API source configuration and discovery. */
@@ -211,6 +285,14 @@ class MacCmsRepository(context: Context) {
         }
     }
 
+    internal fun playbackProgressSyncKey(video: RemoteVideo, lineName: String, episode: PlaybackEpisode): String? {
+        if (video.id.startsWith("orbit:") || video.remoteId.isBlank()) return null
+        val source = sources().firstOrNull { it.id == video.sourceId } ?: return null
+        return runCatching {
+            watchProgressSyncKey("${hubSourceKey(source.api)}:${syncEncode(video.remoteId)}", lineName, episode)
+        }.getOrNull()
+    }
+
     fun saveWatchProgress(
         video: RemoteVideo,
         lineName: String,
@@ -237,6 +319,9 @@ class MacCmsRepository(context: Context) {
                 put("updated_at", now)
             }
             db.insertWithOnConflict(WATCH_HISTORY_TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+            runCatching { historySyncKey(video) }.getOrNull()?.let { key ->
+                db.delete("sync_state", "state_key = ?", arrayOf("watch_snapshot_hold:$key"))
+            }
             enqueueWatchSync(record)
             val overflow = mutableListOf<String>()
             db.rawQuery(
@@ -250,20 +335,29 @@ class MacCmsRepository(context: Context) {
         }
     }
 
-    private fun enqueueWatchSync(record: WatchRecord) {
-        val source = sources().firstOrNull { it.id == record.video.sourceId } ?: return
+    private fun enqueueWatchSync(record: WatchRecord): Boolean {
+        val source = sources().firstOrNull { it.id == record.video.sourceId } ?: return false
         val sourceKey = hubSourceKey(source.api)
         val videoKey = "$sourceKey:${syncEncode(record.video.remoteId)}"
-        val episodeIndex = episodeIndex(record.episode.title)
-        val progressKey = "$videoKey:${syncEncode(record.lineName)}:$episodeIndex"
+        if (database.readSyncState("watch_snapshot_hold:$videoKey").isNotBlank()) return false
+        if (record.video.id.startsWith("orbit:") || record.video.remoteId.isBlank()) return false
+        val progressKey = watchProgressSyncKey(videoKey, record.lineName, record.episode) ?: return false
+        val episodeIndex = record.episode.lineEpisodeIndex!!
         val payload = JSONObject().put("video", videoToJson(record.video)).put("source_api", source.api)
             .put("line_name", record.lineName).put("episode_title", record.episode.title)
-            .put("line_index", 0).put("episode_index", episodeIndex)
+            .put("episode_index", episodeIndex).put("cineo_index_base", 0)
             .put("position_ms", record.positionMs).put("duration_ms", record.durationMs)
             .put("updated_at", record.updatedAt)
+        // Do not replace unresolved older queue entries or tombstones. They
+        // remain visible for explicit recovery rather than being guessed away.
+        val existingHistory = database.readSyncOutboxItem("history", videoKey)
+        val existingProgress = database.readSyncOutboxItem("progress", progressKey)
+        if (listOfNotNull(existingHistory, existingProgress).any {
+                !hasTrustedWatchIdentity(it) || it.updatedAt > record.updatedAt
+            }) return false
         database.writeEpisodeProgress(progressKey, record.video.id, payload.toString(), record.updatedAt)
-        database.enqueueSyncEnvelope("history", videoKey, record.updatedAt, false, payload.toString())
         database.enqueueSyncEnvelope("progress", progressKey, record.updatedAt, false, payload.toString())
+        return true
     }
 
     private fun enqueueSourceSync(source: VideoSource) {
@@ -273,7 +367,7 @@ class MacCmsRepository(context: Context) {
         database.enqueueSyncEnvelope("site", hubSourceKey(source.api), System.currentTimeMillis(), false, payload.toString())
     }
 
-    fun enqueueLocalSyncSnapshot() {
+    fun enqueueLocalSyncSnapshot(): Int {
         sources().forEach(::enqueueSourceSync)
         database.readableDatabase.query(FAVORITES_TABLE, arrayOf("video_json", "added_at"), null, null, null, null, null).use { cursor ->
             while (cursor.moveToNext()) {
@@ -286,7 +380,9 @@ class MacCmsRepository(context: Context) {
                 }
             }
         }
-        watchHistory().forEach(::enqueueWatchSync)
+        var skipped = 0
+        watchHistory().forEach { if (!enqueueWatchSync(it)) skipped++ }
+        return skipped
     }
 
     internal fun applyRemoteSyncEnvelopes(
@@ -303,6 +399,48 @@ class MacCmsRepository(context: Context) {
                 "history", "progress" -> applyRemoteProgress(envelope, payload, localDeviceId, isSnapshot)
             }
         }
+    }
+
+    internal fun recordConfirmedWatch(envelopes: List<SyncEnvelope>) {
+        val confirmations = mutableMapOf<String, String>()
+        for (envelope in envelopes) {
+            if (envelope.entity !in setOf("history", "progress") || envelope.deleted || !hasTrustedWatchIdentity(envelope)) continue
+            val filmKey = watchFilmKey(envelope.key) ?: continue
+            val local = watchHistory().firstOrNull { runCatching { historySyncKey(it.video) }.getOrNull() == filmKey } ?: continue
+            if (local.updatedAt == envelope.updatedAt) confirmations["watch_confirmed:$filmKey"] = local.updatedAt.toString()
+        }
+        if (confirmations.isNotEmpty()) database.writeSyncState(confirmations)
+    }
+
+    internal fun reconcileConfirmedWatchSnapshot(envelopes: List<SyncEnvelope>) {
+        val snapshotFilms = envelopes.asSequence()
+            .filter { it.entity in setOf("history", "progress") && !it.deleted }
+            .mapNotNull { watchFilmKey(it.key) }.toSet()
+        val db = database.writableDatabase
+        db.beginTransaction()
+        try {
+            val pending = database.readSyncOutbox(Int.MAX_VALUE)
+            for (record in watchHistory()) {
+                if (record.video.id.startsWith("orbit:")) continue
+                val filmKey = runCatching { historySyncKey(record.video) }.getOrNull() ?: continue
+                if (filmKey in snapshotFilms) {
+                    db.delete("sync_state", "state_key = ?", arrayOf("watch_snapshot_hold:$filmKey"))
+                    continue
+                }
+                val confirmedAt = database.readSyncState("watch_confirmed:$filmKey").toLongOrNull()
+                if (!mayRemoveSyncedWatch(filmKey, record.updatedAt, confirmedAt, snapshotFilms, pending)) {
+                    db.insertWithOnConflict("sync_state", null, ContentValues().apply {
+                        put("state_key", "watch_snapshot_hold:$filmKey")
+                        put("state_value", record.updatedAt.toString())
+                    }, SQLiteDatabase.CONFLICT_REPLACE)
+                    continue
+                }
+                db.delete(WATCH_HISTORY_TABLE, "video_id = ? AND updated_at = ?", arrayOf(record.video.id, record.updatedAt.toString()))
+                db.delete("episode_progress", "video_id = ? AND updated_at <= ?", arrayOf(record.video.id, record.updatedAt.toString()))
+                db.delete("sync_state", "state_key IN (?, ?)", arrayOf("watch_confirmed:$filmKey", "watch_snapshot_hold:$filmKey"))
+            }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
     }
 
     private fun applyRemoteSite(envelope: SyncEnvelope, payload: JSONObject, localDeviceId: String) {
@@ -330,18 +468,8 @@ class MacCmsRepository(context: Context) {
         writeSources(sources().filterNot { it.id == source.id })
     }
 
-    private fun localVideo(payload: JSONObject): Pair<RemoteVideo, VideoSource>? {
-        val raw = payload.optJSONObject("video") ?: payload
-        val api = payload.optString("source_api")
-        val source = sources().firstOrNull { api.isNotBlank() && hubSourceKey(it.api) == hubSourceKey(api) }
-            ?: sources().firstOrNull { hubSourceKey(it.api) == envelopeSourceKey(payload, raw) }
-            ?: return null
-        val video = runCatching { videoFromJson(raw) }.getOrNull() ?: return null
-        return video.copy(id = "${source.id}:${video.remoteId}", sourceId = source.id, sourceName = source.name) to source
-    }
-
-    private fun envelopeSourceKey(payload: JSONObject, video: JSONObject): String =
-        payload.optString("source_key").ifBlank { video.optString("sourceKey") }
+    private fun localVideo(key: String, payload: JSONObject): Pair<RemoteVideo, VideoSource>? =
+        decodeHubVideo(key, payload, sources())
 
     private fun favoriteForSyncKey(key: String): RemoteVideo? = favorites().firstOrNull { video ->
         val source = sources().firstOrNull { it.id == video.sourceId } ?: return@firstOrNull false
@@ -374,7 +502,7 @@ class MacCmsRepository(context: Context) {
             if (existingFavorite != null) database.writableDatabase.delete(FAVORITES_TABLE, "video_id = ?", arrayOf(existingFavorite.id))
             return
         }
-        val (video, _) = localVideo(payload) ?: return
+        val (video, _) = localVideo(envelope.key, payload) ?: return
         if (local != null && compareSyncState(local, envelope) > 0) {
             if (!isSnapshot) enqueueFavoriteSync(existingFavorite!!, local.updatedAt)
             return
@@ -390,7 +518,7 @@ class MacCmsRepository(context: Context) {
     }
 
     private fun progressSyncKey(record: WatchRecord): String? = historySyncKey(record.video)?.let { videoKey ->
-        "$videoKey:${syncEncode(record.lineName)}:${episodeIndex(record.episode.title)}"
+        watchProgressSyncKey(videoKey, record.lineName, record.episode)
     }
 
     private fun applyRemoteProgress(
@@ -412,7 +540,7 @@ class MacCmsRepository(context: Context) {
                 return
             }
             if (envelope.deleted) {
-                database.writeEpisodeProgress(envelope.key, "", "{}", envelope.updatedAt, deleted = true)
+                database.deleteEpisodeProgress(envelope.key, envelope.updatedAt)
                 return
             }
         }
@@ -430,9 +558,22 @@ class MacCmsRepository(context: Context) {
             return
         }
 
-        val pair = localVideo(payload) ?: return
+        val pair = localVideo(envelope.key, payload) ?: return
         val video = pair.first
-        val record = WatchRecord(video, payload.optString("line_name"), PlaybackEpisode(payload.optString("episode_title"), ""),
+        val lineName = payload.optString("line_name")
+        val rawIndex = payload.opt("episode_index")
+        val index = (rawIndex as? Int)?.takeIf { it >= 0 }
+        val expectedVideoKey = historySyncKey(video)
+        val trustedIndex = index?.takeIf {
+            val expectedProgressKey = expectedVideoKey?.let { key ->
+                watchProgressSyncKey(key, lineName, PlaybackEpisode("", "", it))
+            }
+            payload.optInt("cineo_index_base", -1) == 0 &&
+                expectedVideoKey != null &&
+                ((envelope.entity == "progress" && envelope.key == expectedProgressKey) ||
+                    (envelope.entity == "history" && envelope.key == expectedVideoKey))
+        }
+        val record = WatchRecord(video, lineName, PlaybackEpisode(payload.optString("episode_title"), "", trustedIndex),
             payload.optLong("position_ms"), payload.optLong("duration_ms"), envelope.updatedAt)
         if (envelope.entity == "progress") {
             database.writeEpisodeProgress(envelope.key, video.id, payload.toString(), envelope.updatedAt)
@@ -458,11 +599,6 @@ class MacCmsRepository(context: Context) {
             while (c.moveToNext()) overflow += c.getString(0)
         }
         overflow.forEach { db.delete(WATCH_HISTORY_TABLE, "video_id = ?", arrayOf(it)) }
-    }
-
-    private fun episodeIndex(title: String): Int {
-        val match = Regex("(?:第\\s*)?(\\d+)(?:\\s*[集话期])?").find(title)
-        return match?.groupValues?.get(1)?.toIntOrNull()?.minus(1)?.coerceAtLeast(0) ?: 0
     }
 
     fun saveSource(source: VideoSource) {
@@ -726,30 +862,22 @@ class MacCmsRepository(context: Context) {
             id = "${source.id}:$remoteId", sourceId = source.id, sourceName = source.name,
             remoteId = remoteId, title = title, category = category,
             year = item.optString("vod_year"), description = description,
-            posterUrl = poster, rating = item.optString("vod_score")
+            posterUrl = poster, rating = item.optString("vod_score"),
+            episodeBadge = videoEpisodeBadge(item)
         )
     }
 
     private fun playbackLines(item: JSONObject, source: VideoSource): List<PlaybackLine> {
         val names = item.optString("vod_play_from").split("\$\$\$")
         val groups = item.optString("vod_play_url").split("\$\$\$")
-        return groups.mapIndexedNotNull { groupIndex, group ->
-            val episodes = group.split('#').mapIndexedNotNull { episodeIndex, raw ->
-                val entry = raw.trim()
-                if (entry.isEmpty()) return@mapIndexedNotNull null
-                val separator = entry.indexOf('$')
-                val title = if (separator < 0) entry else entry.substring(0, separator).trim()
-                val address = if (separator < 0) entry else entry.substring(separator + 1).trim()
-                if (address.isEmpty()) null else PlaybackEpisode(
-                    title.ifEmpty { "第 ${episodeIndex + 1} 集" },
-                    resolve(source.api, address)
-                )
-            }
+        val parsed = groups.mapIndexedNotNull { groupIndex, group ->
+            val episodes = parseLineEpisodes(group) { address -> resolve(source.api, address) }
             if (episodes.isEmpty()) null else PlaybackLine(
                 names.getOrNull(groupIndex)?.trim()?.takeIf(String::isNotEmpty) ?: "播放源 ${groupIndex + 1}",
                 episodes
             )
         }
+        return disableAmbiguousLineIndices(parsed)
     }
 
     private fun resolve(base: String, value: String): String {
@@ -909,6 +1037,7 @@ class MacCmsRepository(context: Context) {
         put("description", video.description)
         put("posterUrl", video.posterUrl)
         put("rating", video.rating)
+        put("episodeBadge", video.episodeBadge)
     }
 
     private fun videoFromJson(json: JSONObject) = RemoteVideo(
@@ -921,7 +1050,8 @@ class MacCmsRepository(context: Context) {
         year = json.optString("year"),
         description = json.optString("description"),
         posterUrl = json.optString("posterUrl"),
-        rating = json.optString("rating")
+        rating = json.optString("rating"),
+        episodeBadge = json.optString("episodeBadge")
     )
 
     private fun watchRecordToJson(record: WatchRecord) = JSONObject().apply {
@@ -929,6 +1059,7 @@ class MacCmsRepository(context: Context) {
         put("lineName", record.lineName)
         put("episodeTitle", record.episode.title)
         put("episodeUrl", record.episode.url)
+        record.episode.lineEpisodeIndex?.takeIf { it >= 0 }?.let { put("lineEpisodeIndex", it) }
         put("positionMs", record.positionMs)
         put("durationMs", record.durationMs)
         put("updatedAt", record.updatedAt)
@@ -937,7 +1068,7 @@ class MacCmsRepository(context: Context) {
     private fun watchRecordFromJson(json: JSONObject) = WatchRecord(
         video = videoFromJson(json.getJSONObject("video")),
         lineName = json.optString("lineName"),
-        episode = PlaybackEpisode(json.optString("episodeTitle"), json.optString("episodeUrl")),
+        episode = episodeFromHistory(json),
         positionMs = json.optLong("positionMs"),
         durationMs = json.optLong("durationMs"),
         updatedAt = json.optLong("updatedAt")

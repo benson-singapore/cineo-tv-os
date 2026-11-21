@@ -1522,7 +1522,9 @@ private fun HubSyncPage(
             }
             Spacer(Modifier.height(12.dp))
             Text("推送全部时按更新时间解决冲突，以较新的为准。", color = ScreenMuted, fontSize = 12.sp)
-            pushProgress?.let { Text("已推送 ${it.first}/${it.second}", color = AccentGold, fontSize = 12.sp) }
+            pushProgress?.takeIf { it.second > 0 }?.let {
+                Text("已处理 ${it.first}/${it.second}", color = AccentGold, fontSize = 12.sp)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 TvActionButton(if (busy) "推送中…" else "推送全部", primary = true,
                     modifier = Modifier.focusRequester(entryFocusRequester)
@@ -2016,8 +2018,12 @@ internal fun RemoteVideoDetailScreen(
         ?: video.rating
     val watchRecord = repository.watchRecord(video)
     val resumeTarget = watchRecord?.let { record ->
-        lines.firstNotNullOfOrNull { line ->
-            matchingHistoryEpisode(record, line.episodes)?.let { episode -> line to episode }
+        if (record.episode.url.isBlank()) {
+            resolveSyncedEpisode(record, RemoteVideoDetail(video, lines))
+        } else {
+            lines.firstNotNullOfOrNull { line ->
+                matchingHistoryEpisode(record, line.episodes)?.let { episode -> line to episode }
+            }
         }
     }
     val episodeRowState = rememberLazyListState()
@@ -2118,7 +2124,7 @@ internal fun RemoteVideoDetailScreen(
                     Spacer(Modifier.height(18.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         val firstEpisode = selectedLine?.episodes?.firstOrNull()
-                        val continueTarget = resumeTarget ?: watchRecord?.let { record ->
+                        val continueTarget = resumeTarget ?: watchRecord?.takeIf { it.episode.url.isNotBlank() }?.let { record ->
                             PlaybackLine(record.lineName, listOf(record.episode)) to record.episode
                         }
                         TvActionButton(
