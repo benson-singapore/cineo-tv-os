@@ -3,8 +3,10 @@ package com.nova.tv
 internal data class OrbitCoverMetadata(val rating: String?, val episodes: String?)
 
 /** Only the metadata prefix is interpreted; the synopsis is never searched for numbers. */
-internal fun orbitCoverMetadata(pluginId: String?, content: String?): OrbitCoverMetadata {
-    if (pluginId != "aihuangdou" || content.isNullOrBlank()) return OrbitCoverMetadata(null, null)
+internal fun orbitCoverMetadata(pluginId: String?, content: String?, itemKey: String? = null): OrbitCoverMetadata {
+    val supported = pluginId in setOf("aihuangdou", "huangguoai") ||
+        itemKey?.substringBefore(':', "") == "huangguoai"
+    if (!supported || content.isNullOrBlank()) return OrbitCoverMetadata(null, null)
     val ratingPattern = Regex("评分\\s*(\\d{1,2}(?:\\.\\d{1,2})?)\\s*分")
     val episodePattern = Regex("(\\d{1,6})\\s*集")
     var rating: String? = null

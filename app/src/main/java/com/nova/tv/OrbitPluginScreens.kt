@@ -858,7 +858,7 @@ internal fun OrbitPluginScreen(
                                         }
                                     }
                                 OrbitPosterCard(item.title, item.imageUrl, channel?.label.orEmpty(), modifier = posterModifier, aspectRatio = posterRatio,
-                                    metadata = orbitCoverMetadata(selected?.pluginId, item.raw.opt("content") as? String)) { historyOrigin = false; openVideo(item) }
+                                    metadata = orbitCoverMetadata(selected?.pluginId, item.raw.opt("content") as? String, item.raw.optString("itemKey"))) { historyOrigin = false; openVideo(item) }
                             }
                             if (hasNextPage && (loadingMore || pageLoadFailed)) item(key = "orbit-page-status", span = { GridItemSpan(maxLineSpan) }) {
                                 if (pageLoadFailed) OrbitAction(if (loadingMore) "正在重试…" else "加载失败，重试", primary = true, modifier = Modifier.fillMaxWidth()) {
