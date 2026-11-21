@@ -12,6 +12,7 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import org.junit.Assume.assumeTrue
 import java.util.UUID
 
 /** Uses unique test-only database and preferences on an isolated emulator. */
@@ -67,8 +68,26 @@ class WatchSnapshotInstrumentedTest {
     }
     private fun invalidated() = HubHttpReply(409, HubEnvelopeResult(false, null, HubFailure.ResyncRequired), null)
 
+    @Test fun isolatedHubRealTvPush() = runBlocking {
+        val args = InstrumentationRegistry.getArguments()
+        assumeTrue("Only run with isolated Hub arguments", args.getString("testHub") != null && args.getString("testPin") != null)
+        val hub = requireNotNull(args.getString("testHub")) { "testHub instrumentation argument required" }
+        val pin = requireNotNull(args.getString("testPin")) { "testPin instrumentation argument required" }
+        require(hub.startsWith("http://10.0.2.2:")) { "Only isolated emulator host Hub is allowed" }
+        val binding = engine.bind(hub, pin)
+        assertTrue("binding failed: $binding", engine.credentials.isBound)
+        val progress = save("42")
+        engine.syncAfterPlaybackPause(progress.key)
+        assertNull("progress was not accepted by Hub", db.readSyncOutboxItem("progress", progress.key))
+    }
+
     @Test fun sqliteReconcileDeletesConfirmedButPreservesPendingLegacyAndOrbit() = runBlocking {
         val confirmed = save("confirmed")
+        assertEquals("2026", confirmed.payload?.get("year"))
+        assertEquals("剧集", confirmed.payload?.get("category"))
+        val metadata = confirmed.payload?.get("video") as Map<*, *>
+        assertEquals("2026", metadata["year"])
+        assertEquals("剧集", metadata["category"])
         repo.recordConfirmedWatch(listOf(confirmed))
         db.clearSyncOutbox()
         val pending = save("pending")
