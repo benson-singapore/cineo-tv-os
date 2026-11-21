@@ -81,9 +81,15 @@ internal fun OrbitPluginScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val previewPreferences = remember(context) { context.getSharedPreferences("orbit_preview", android.content.Context.MODE_PRIVATE) }
-    var previewColumns by remember { mutableIntStateOf(previewPreferences.getInt("columns", 4).coerceIn(2, 6)) }
+    var selected by remember { mutableStateOf<OrbitPluginConfig?>(null) }
+    val selectionHub = DeviceCredentialStore(context).hubUrl.orEmpty()
+    val previewStore = remember(previewPreferences) { OrbitPreviewPreferences(previewPreferences) }
     val ratios = listOf("3:4", "4:3", "16:9", "9:16", "1:1")
-    var previewRatio by remember { mutableStateOf(previewPreferences.getString("ratio", "3:4")?.takeIf { it in ratios } ?: "3:4") }
+    var previewConfig by remember(selectionHub, selected?.id) {
+        mutableStateOf(selected?.let { previewStore.read(selectionHub, it.id) } ?: OrbitPreviewConfig())
+    }
+    val previewColumns = previewConfig.columns
+    val previewRatio = previewConfig.ratio
     val posterRatio = when (previewRatio) {
         "4:3" -> 4f / 3f
         "16:9" -> 16f / 9f
@@ -107,7 +113,10 @@ internal fun OrbitPluginScreen(
     val firstPosterFocus = remember { FocusRequester() }
     val topPosterFocus = remember { FocusRequester() }
     val refreshFocus = remember { FocusRequester() }
-    var selected by remember { mutableStateOf<OrbitPluginConfig?>(null) }
+    fun rememberSelection(config: OrbitPluginConfig) {
+        previewPreferences.edit().putString("selected_hub", selectionHub)
+            .putString("selected_plugin", config.id).putString("selected_channel", config.channelId).apply()
+    }
     var channel by remember { mutableStateOf<OrbitChannel?>(null) }
     var content by remember { mutableStateOf(emptyList<OrbitVideoItem>()) }
     val gridState = rememberLazyGridState()
@@ -175,7 +184,10 @@ internal fun OrbitPluginScreen(
                 val result = withContext(Dispatchers.IO) { repository.listPlugins() }
                 if (generation == pluginGeneration) {
                     plugins = result
-                    selected = selected?.let { current -> result.firstOrNull { it.id == current.id && it.channelId == current.channelId } } ?: result.firstOrNull()
+                    val sameHub = previewPreferences.getString("selected_hub", null) == selectionHub
+                    selected = restoreOrbitSelection(result, selected,
+                        if (sameHub) previewPreferences.getString("selected_plugin", null) else null,
+                        if (sameHub) previewPreferences.getString("selected_channel", null) else null)
                     if (result.isEmpty()) pluginError = "Hub 目前没有启用的 Orbit 插件"
                 }
             } catch (failure: Exception) {
@@ -523,6 +535,7 @@ internal fun OrbitPluginScreen(
                             requestGeneration++
                             channel = null; content = emptyList(); next = null; listContext = null
                             loading = true; actionError = null; showHistory = false; selected = config
+                            rememberSelection(config)
                         }
                         scope.launch { withFrameNanos { }; runCatching { pickerFocus.requestFocus() } }
                     }
@@ -551,8 +564,8 @@ internal fun OrbitPluginScreen(
                     (2..6).forEach { count ->
                         OrbitAction("$count 列", selected = previewColumns == count,
                             modifier = Modifier.focusRequester(columnFocus.getValue(count)).focusProperties { down = ratioFocus.getValue(previewRatio) }) {
-                            previewColumns = count
-                            previewPreferences.edit().putInt("columns", count).apply()
+                            previewConfig = previewConfig.copy(columns = count)
+                            selected?.let { previewStore.write(selectionHub, it.id, previewConfig) }
                         }
                     }
                 }
@@ -565,8 +578,8 @@ internal fun OrbitPluginScreen(
                             modifier = Modifier.focusRequester(ratioFocus.getValue(ratio)).focusProperties {
                                 up = columnFocus.getValue(previewColumns); down = doneFocus
                             }) {
-                            previewRatio = ratio
-                            previewPreferences.edit().putString("ratio", ratio).apply()
+                            previewConfig = previewConfig.copy(ratio = ratio)
+                            selected?.let { previewStore.write(selectionHub, it.id, previewConfig) }
                         }
                     }
                 }
@@ -623,6 +636,7 @@ internal fun OrbitPluginScreen(
                             requestGeneration++
                             channel = null; content = emptyList(); next = null; listContext = null
                             loading = true; actionError = null; showHistory = false; selected = config
+                            rememberSelection(config)
                         }
                     }
                 }
@@ -735,6 +749,7 @@ internal fun OrbitPluginScreen(
                                     pendingHistoryEntry = entry
                                     showHistory = false
                                     selected = target
+                                    rememberSelection(target)
                                 } else if (target != null) {
                                     historyOrigin = true; showHistory = false
                                     openVideo(entry.selection.video)

@@ -10,6 +10,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OrbitPluginRepositoryTest {
+    @Test fun restoresSelectedPluginAndChannelWithoutLosingFallbacks() {
+        val a = OrbitPluginConfig("a", "A", "a", "one")
+        val b = OrbitPluginConfig("b", "B", "b", "one")
+        val b2 = b.copy(channelId = "two")
+        val configs = listOf(a, b, b2)
+        assertEquals(b2, restoreOrbitSelection(configs, null, "b", "two"))
+        assertEquals(b, restoreOrbitSelection(configs, null, "b", "missing"))
+        assertEquals(a, restoreOrbitSelection(configs, null, "missing", "two"))
+        assertEquals(a, restoreOrbitSelection(configs, a, "b", "two"))
+        assertNull(restoreOrbitSelection(emptyList(), null, "b", "two"))
+    }
+
     @Test fun expandsPluginWithoutBoundChannel() {
         val data = parseHubDataEnvelope(200, fixture("capabilities.json"))
         val config = OrbitPluginConfig("config-1", "Orbit", "aihuangdou", "")

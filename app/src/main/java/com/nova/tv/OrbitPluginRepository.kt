@@ -15,6 +15,17 @@ internal data class OrbitPluginConfig(
     val description: String = ""
 )
 
+internal fun restoreOrbitSelection(
+    configs: List<OrbitPluginConfig>, current: OrbitPluginConfig?, savedId: String?, savedChannelId: String?
+): OrbitPluginConfig? {
+    if (current != null) configs.firstOrNull { it.id == current.id && it.channelId == current.channelId }?.let { return it }
+    if (!savedId.isNullOrBlank()) {
+        configs.firstOrNull { it.id == savedId && it.channelId == savedChannelId }?.let { return it }
+        configs.firstOrNull { it.id == savedId }?.let { return it }
+    }
+    return configs.firstOrNull()
+}
+
 internal data class OrbitOperation(
     val operation: String,
     val label: String,
