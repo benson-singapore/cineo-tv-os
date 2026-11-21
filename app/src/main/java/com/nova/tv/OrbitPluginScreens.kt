@@ -692,12 +692,13 @@ internal fun OrbitPluginScreen(
                 }
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(22.dp)) {
                     item {
-                        Box(Modifier.fillMaxWidth().height(300.dp).clip(RoundedCornerShape(12.dp))) {
-                            RemoteArtwork(video.imageUrl, video.title, Modifier.fillMaxSize())
-                            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(OrbitInk, OrbitInk.copy(alpha = .55f), Color.Transparent))))
-                            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, OrbitInk))))
+                        Box(Modifier.fillMaxWidth().heightIn(min = 300.dp).clip(RoundedCornerShape(12.dp))) {
+                            RemoteArtwork(video.imageUrl, video.title, Modifier.matchParentSize(), fallbackTextSize = 0.sp)
+                            Box(Modifier.matchParentSize().background(Brush.horizontalGradient(listOf(OrbitInk, OrbitInk.copy(alpha = .55f), Color.Transparent))))
+                            Box(Modifier.matchParentSize().background(Brush.verticalGradient(listOf(Color.Transparent, OrbitInk))))
                             Column(Modifier.align(Alignment.CenterStart).padding(26.dp).fillMaxWidth(.7f)) {
-                                Text(video.title, color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+                                Text(video.title, color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold,
+                                    maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                 Spacer(Modifier.height(12.dp))
                                 Text(channel?.label.orEmpty(), color = OrbitGold, fontSize = 15.sp)
                                 Text("播放来源：${selected?.name.orEmpty()}", color = OrbitMuted, fontSize = 13.sp)
