@@ -48,6 +48,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -177,6 +178,16 @@ private fun ExitChoiceButton(
 @OptIn(ExperimentalTvMaterial3Api::class)
 private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEngine, orbitRepository: OrbitPluginRepository, onExit: () -> Unit) {
     val context = LocalContext.current
+    var update by remember { mutableStateOf<ReleaseUpdate?>(null) }
+    var updateCheckFailed by remember { mutableStateOf(false) }
+    var updateChecking by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty() }.getOrDefault("")
+        val result = runCatching { checkRelease(version) }
+        update = result.getOrNull()
+        updateCheckFailed = result.isFailure
+        updateChecking = false
+    }
     val orbitHistory = remember(context) { OrbitWatchHistory(context) }
     val menuPreferences = remember(context) { NavigationMenuPreferences(context.applicationContext) }
     val tmdbSettings = remember(context) { TmdbSettingsStore(context.applicationContext) }
@@ -382,6 +393,9 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     }
                 )
                 section == "配置" -> SettingsScreen(
+                    update = update,
+                    updateChecking = updateChecking,
+                    updateCheckFailed = updateCheckFailed,
                     repository = videoRepository,
                     tmdbSettings = tmdbSettings,
                     tmdbRepository = tmdbRepository,
@@ -728,6 +742,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                         modifier = Modifier.size(20.dp),
                         tint = if (section == settingsDestination.label || settingsFocused) Gold else Color(0xFFBBC2CD)
                     )
+                    if (update != null) Box(Modifier.testTag("settings-update-dot").align(Alignment.TopEnd).padding(4.dp).size(8.dp).clip(CircleShape).background(Color(0xFFFF4545)))
                 }
             }
         }

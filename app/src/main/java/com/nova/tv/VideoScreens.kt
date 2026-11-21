@@ -1,6 +1,8 @@
 package com.nova.tv
 
 import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import android.view.WindowManager
@@ -47,6 +49,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -1008,6 +1011,9 @@ fun LocalVideoListScreen(
 
 @Composable
 internal fun SettingsScreen(
+    update: ReleaseUpdate?,
+    updateChecking: Boolean,
+    updateCheckFailed: Boolean,
     repository: MacCmsRepository,
     tmdbSettings: TmdbSettingsStore,
     tmdbRepository: TmdbMetadataRepository,
@@ -1099,6 +1105,7 @@ internal fun SettingsScreen(
             SettingsMenuItem(
                 "版本更新",
                 selected = selectedSetting == "版本更新",
+                showDot = update != null,
                 modifier = Modifier
                     .then(if (selectedSetting == "版本更新") Modifier.focusRequester(entryFocusRequester).focusRequester(selectedSettingFocusRequester) else Modifier)
                     .focusProperties { right = detailEntryFocusRequester }
@@ -1118,7 +1125,7 @@ internal fun SettingsScreen(
                     onSettingsChange = onMenuSettingsChange
                 )
             } else if (selectedSetting == "版本更新") {
-                AppVersionPage(versionName, versionCode, detailEntryFocusRequester)
+                AppVersionPage(versionName, versionCode, detailEntryFocusRequester, update, updateChecking, updateCheckFailed)
             } else if (selectedSetting == "云端同步") {
                 HubSyncPage(hubSyncEngine, detailEntryFocusRequester, selectedSettingFocusRequester)
             } else if (selectedSetting == "TMDB 数据") {
@@ -1237,12 +1244,19 @@ internal fun SettingsScreen(
 }
 
 @Composable
-private fun AppVersionPage(
+internal fun AppVersionPage(
     versionName: String,
     versionCode: String,
-    entryFocusRequester: FocusRequester
+    entryFocusRequester: FocusRequester,
+    update: ReleaseUpdate?,
+    checking: Boolean,
+    failed: Boolean,
+    openUrl: ((String) -> Unit)? = null
 ) {
+    val context = LocalContext.current
+    var openFailed by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
+    var downloadFocused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(14.dp)
 
     Column(Modifier.fillMaxSize().padding(end = 8.dp)) {
@@ -1252,6 +1266,7 @@ private fun AppVersionPage(
         Spacer(Modifier.height(22.dp))
         Column(
             Modifier.fillMaxWidth()
+                .testTag("current-version-card")
                 .focusRequester(entryFocusRequester)
                 .onFocusChanged { focused = it.isFocused }
                 .clip(shape)
@@ -1272,9 +1287,19 @@ private fun AppVersionPage(
         ) {
             Text("应用更新", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(10.dp))
-            Text("尚未接入更新服务", color = AccentGold, fontSize = 14.sp)
+            Text(when { checking -> "正在检查更新…"; failed -> "检查更新失败，请检查网络后重新打开应用"; update != null -> "发现新版本 ${update.version}"; else -> "当前已是最新版本" }, color = AccentGold, fontSize = 14.sp)
             Spacer(Modifier.height(8.dp))
-            Text("后续可在这里查看新版说明、同步最新版本并下载安装包。", color = ScreenMuted, fontSize = 13.sp)
+            if (update != null) {
+                Text("前往发布页面下载安装新版本", color = ScreenMuted, fontSize = 13.sp)
+                Spacer(Modifier.height(10.dp))
+                Text("打开下载页面", modifier = Modifier.onFocusChanged { downloadFocused = it.isFocused }
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (downloadFocused) Color.White else Color(0xFF26313D))
+                    .clickable {
+                    openFailed = runCatching { if (openUrl != null) openUrl(update.url) else context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.url))) }.isFailure
+                }.padding(horizontal = 16.dp, vertical = 10.dp), color = if (downloadFocused) Color(0xFF172026) else AccentGold, fontSize = 14.sp)
+                if (openFailed) Text("无法打开下载页面，请使用浏览器访问 GitHub 发布页", color = ScreenMuted, fontSize = 13.sp)
+            }
         }
     }
 }
@@ -1765,10 +1790,11 @@ private fun SettingsControlButton(
 }
 
 @Composable
-private fun SettingsMenuItem(
+internal fun SettingsMenuItem(
     label: String,
     selected: Boolean,
     modifier: Modifier = Modifier,
+    showDot: Boolean = false,
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -1800,6 +1826,7 @@ private fun SettingsMenuItem(
             fontSize = 14.sp,
             fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Medium
         )
+        if (showDot) { Spacer(Modifier.width(8.dp)); Box(Modifier.testTag("update-dot").size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(Color(0xFFFF4545))) }
     }
 }
 
