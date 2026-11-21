@@ -685,7 +685,7 @@ internal fun OrbitPluginScreen(
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             items(chapters, key = { it.id }) { episode ->
                                 val episodeFocus = remember(episode.id) { FocusRequester() }
-                                OrbitPosterCard(episode.title, episode.raw.orbitArtwork().ifBlank { video.imageUrl },
+                                OrbitPosterCard(episode.title, video.imageUrl,
                                     "第 ${chapters.indexOf(episode) + 1} 集", Modifier.width(224.dp).focusRequester(episodeFocus), landscape = true) { playEpisode(episode, episodeFocus) }
                             }
                             if (chaptersNext != null || canOffsetPage(channel?.operations?.firstOrNull { it.operation == "page" && (it.scope == "chapters" || it.pagination?.scope == "chapters") }, chaptersHasMore)) item {
@@ -815,10 +815,6 @@ internal fun nextOrbitEpisode(episodes: List<OrbitEpisodeItem>, currentId: Strin
     val index = episodes.indexOfFirst { it.id == currentId }
     return if (index >= 0) episodes.getOrNull(index + 1) else null
 }
-
-private fun org.json.JSONObject.orbitArtwork(): String =
-    sequenceOf("image", "cover", "poster", "thumbnail").map { optString(it) }
-        .firstOrNull { it.startsWith("https://") }.orEmpty()
 
 @Composable
 internal fun OrbitPosterCard(
