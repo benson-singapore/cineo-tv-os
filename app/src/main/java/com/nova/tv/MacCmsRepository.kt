@@ -344,6 +344,7 @@ class MacCmsRepository(context: Context) {
         val progressKey = watchProgressSyncKey(videoKey, record.lineName, record.episode) ?: return false
         val episodeIndex = record.episode.lineEpisodeIndex!!
         val payload = JSONObject().put("video", videoToJson(record.video)).put("source_api", source.api)
+            .put("year", record.video.year).put("category", record.video.category)
             .put("line_name", record.lineName).put("episode_title", record.episode.title)
             .put("episode_index", episodeIndex).put("cineo_index_base", 0)
             .put("position_ms", record.positionMs).put("duration_ms", record.durationMs)
