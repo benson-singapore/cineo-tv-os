@@ -824,6 +824,13 @@ class MacCmsRepository(context: Context) {
                         }
                     }
                 }
+                // Seed only a fresh installation; an existing empty legacy list
+                // represents the user's choice and must remain empty.
+                if (!legacyPreferences.contains(SOURCE_KEY) && rowCount(db, SOURCES_TABLE) == 0L) {
+                    db.insertOrThrow(SOURCES_TABLE, null, sourceValues(
+                        VideoSource("ruyi", "如意资源", "https://cj.rycjapi.com/api.php/provide/vod", isDefault = true)
+                    ))
+                }
             }
             if (rowCount(db, FAVORITES_TABLE) == 0L) {
                 legacyPreferences.getString(LEGACY_FAVORITES_KEY, null)?.let { raw ->
