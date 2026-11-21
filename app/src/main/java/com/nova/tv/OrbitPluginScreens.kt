@@ -143,6 +143,9 @@ internal fun OrbitPluginScreen(
     var activeQuery by remember { mutableStateOf("") }
     var appliedFilters by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var selectedTag by remember { mutableStateOf<String?>(null) }
+    var showTagFilters by remember(selected?.id, selected?.channelId) { mutableStateOf(false) }
+    val filterButtonFocus = remember { FocusRequester() }
+    val firstTagFocus = remember { FocusRequester() }
     var requestGeneration by remember { mutableIntStateOf(0) }
     var pluginGeneration by remember { mutableIntStateOf(0) }
     var listContext by remember { mutableStateOf<OrbitPageContext?>(null) }
@@ -469,6 +472,9 @@ internal fun OrbitPluginScreen(
         (0 until values.length()).mapNotNull { values.optString(it).takeIf(String::isNotBlank) }
     }.distinct() }
 
+    val hasTagFilters = tags.isNotEmpty() && tags.any { it != channel?.label }
+    val tagFiltersVisible = hasTagFilters && showTagFilters && !showHistory && selectedVideo == null
+
     val currentHistory = remember(selected?.id, selected?.channelId, historyRevision, showHistory) {
         selected?.let { config -> history.entries(config.id) }.orEmpty()
     }
@@ -610,7 +616,8 @@ internal fun OrbitPluginScreen(
                         .focusProperties {
                             if (index == 0) left = menuFocusRequester
                             up = refreshFocus
-                            if (content.isNotEmpty() && selectedVideo == null) down = firstPosterFocus
+                            if (tagFiltersVisible) down = firstTagFocus
+                            else if (listHasEntry && selectedVideo == null) down = firstPosterFocus
                         }, selected = config.id == selected?.id && config.channelId == selected?.channelId) {
                         if (config.id != selected?.id || config.channelId != selected?.channelId) {
                             requestGeneration++
@@ -618,6 +625,17 @@ internal fun OrbitPluginScreen(
                             loading = true; actionError = null; showHistory = false; selected = config
                         }
                     }
+                }
+                if (hasTagFilters && !showHistory && selectedVideo == null) item(key = "orbit-tag-filter-toggle") {
+                    OrbitAction(
+                        if (showTagFilters) "收起筛选" else if (selectedTag != null) "筛选 · $selectedTag" else "筛选",
+                        selected = showTagFilters || selectedTag != null,
+                        modifier = Modifier.focusRequester(filterButtonFocus).focusProperties {
+                            up = refreshFocus
+                            if (tagFiltersVisible) down = firstTagFocus
+                            else if (listHasEntry) down = firstPosterFocus
+                        }
+                    ) { showTagFilters = !showTagFilters }
                 }
             }
         }
@@ -747,11 +765,23 @@ internal fun OrbitPluginScreen(
                 } else if (featureSearch != null) {
                     Text("能力声明不完整：频道标记了搜索，但没有可执行 search operation。", color = OrbitGold, fontSize = 13.sp)
                 }
-                if (tags.isNotEmpty() && tags.any { it != channel?.label }) {
+                if (tagFiltersVisible) {
                     Spacer(Modifier.height(12.dp))
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        item { OrbitAction("全部", selected = selectedTag == null, modifier = Modifier.focusProperties { left = menuFocusRequester }) { selectedTag = null } }
-                        items(tags) { tag -> OrbitAction(tag, selected = selectedTag == tag) { selectedTag = tag } }
+                    LazyRow(modifier = Modifier.focusGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        item {
+                            OrbitAction("全部", selected = selectedTag == null, modifier = Modifier
+                                .focusRequester(firstTagFocus).focusProperties {
+                                    left = menuFocusRequester
+                                    up = filterButtonFocus
+                                    if (listHasEntry) down = firstPosterFocus
+                                }) { selectedTag = null }
+                        }
+                        items(tags, key = { it }) { tag ->
+                            OrbitAction(tag, selected = selectedTag == tag, modifier = Modifier.focusProperties {
+                                up = filterButtonFocus
+                                if (listHasEntry) down = firstPosterFocus
+                            }) { selectedTag = tag }
+                        }
                     }
                 }
                 Spacer(Modifier.height(12.dp))
@@ -791,7 +821,10 @@ internal fun OrbitPluginScreen(
                                     .onFocusChanged { if (it.isFocused) lastFocusedPosterId = item.id }
                                     .focusProperties {
                                         if (index % previewColumns == 0) left = menuFocusRequester
-                                        if (index < previewColumns) channelFocus["${selected?.id}:${selected?.channelId}"]?.let { up = it }
+                                        if (index < previewColumns) {
+                                            if (tagFiltersVisible) up = firstTagFocus
+                                            else channelFocus["${selected?.id}:${selected?.channelId}"]?.let { up = it }
+                                        }
                                     }
                                 OrbitPosterCard(item.title, item.imageUrl, channel?.label.orEmpty(), modifier = posterModifier, aspectRatio = posterRatio,
                                     metadata = orbitCoverMetadata(selected?.pluginId, item.raw.opt("content") as? String)) { historyOrigin = false; openVideo(item) }
