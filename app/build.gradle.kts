@@ -25,7 +25,7 @@ android {
 
     defaultConfig {
         applicationId = "com.nova.tv"
-        minSdk = 36
+        minSdk = 28
         targetSdk = 37
         versionCode = 2
         versionName = "0.1.1"
@@ -51,7 +51,6 @@ android {
             }
             optimization {
                 enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
             }
         }
     }

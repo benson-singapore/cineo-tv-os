@@ -1020,10 +1020,8 @@ internal fun SettingsScreen(
     val context = LocalContext.current
     val packageInfo = remember(context) {
         runCatching {
-            context.packageManager.getPackageInfo(
-                context.packageName,
-                android.content.pm.PackageManager.PackageInfoFlags.of(0)
-            )
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
         }.getOrNull()
     }
     val versionName = packageInfo?.versionName?.takeIf { it.isNotBlank() } ?: "未知"
@@ -2973,9 +2971,17 @@ private suspend fun loadArtwork(url: String): LoadedArtwork? {
                     try {
                         val bytes = connection.getInputStream().use { stream ->
                             val limit = 16 * 1024 * 1024
-                            val data = stream.readNBytes(limit + 1)
-                            require(data.size <= limit) { "Artwork exceeds byte limit" }
-                            data
+                            val output = java.io.ByteArrayOutputStream()
+                            val buffer = ByteArray(8192)
+                            var total = 0
+                            while (true) {
+                                val count = stream.read(buffer)
+                                if (count == -1) break
+                                total += count
+                                require(total <= limit) { "Artwork exceeds byte limit" }
+                                output.write(buffer, 0, count)
+                            }
+                            output.toByteArray()
                         }
                         BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                             ?: if (OrbitArtworkDecoder.supports(candidate)) {
