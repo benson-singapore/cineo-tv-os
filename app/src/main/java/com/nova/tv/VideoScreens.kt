@@ -3060,7 +3060,7 @@ private fun VideoResultCard(
             RemoteArtwork(displayVideo.posterUrl, video.title, Modifier.fillMaxSize(), fallbackUrl = video.posterUrl)
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD090D13)))))
             if (validCoverRating(displayVideo.rating)) Text("★ ${displayVideo.rating}", Modifier.align(Alignment.TopEnd).padding(8.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xB9090D13)).padding(horizontal = 7.dp, vertical = 4.dp), color = AccentGold, fontSize = 10.sp)
-            if (video.episodeBadge.isNotBlank()) Text(video.episodeBadge, Modifier.align(Alignment.BottomEnd).padding(8.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xB9090D13)).padding(horizontal = 7.dp, vertical = 4.dp), color = Color.White, fontSize = 10.sp, maxLines = 1)
+            if (video.episodeBadge.isNotBlank()) Text(video.episodeBadge, Modifier.align(Alignment.BottomEnd).fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 30.dp).wrapContentWidth(Alignment.End).clip(RoundedCornerShape(4.dp)).background(Color(0xE6090D13)).padding(horizontal = 7.dp, vertical = 4.dp), color = Color.White, fontSize = 10.sp, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             Text(video.sourceName, Modifier.align(Alignment.BottomStart).padding(9.dp), color = Color.White.copy(alpha = .85f), fontSize = 9.sp, maxLines = 1)
             if (progress != null && progress > 0f) {
                 Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress.coerceIn(0f, 1f)).height(3.dp).background(AccentGold))
