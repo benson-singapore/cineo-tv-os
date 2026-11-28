@@ -2560,6 +2560,40 @@ private fun PlayerSurface(
     val closePanelFocusRequester = remember { FocusRequester() }
     val showPanelState = rememberUpdatedState(showEpisodePanel)
     val openPanelCallback = rememberUpdatedState<() -> Unit>({ showEpisodePanel = true })
+    val canGoPrevious = if (orbitSelection != null) currentOrbitIndex > 0 else currentEpisodeIndex > 0
+    val canGoNext = if (orbitSelection != null) currentOrbitIndex >= 0 &&
+        (currentOrbitIndex + 1 < orbitEpisodes.size || orbitSession?.discovery?.canLoadMore == true)
+        else currentEpisodeIndex + 1 < availableEpisodes.size
+    fun changeEpisode(forward: Boolean) {
+        if (orbitActionLoading) return
+        if (orbitSelection == null) {
+            val target = availableEpisodes.getOrNull(currentEpisodeIndex + if (forward) 1 else -1) ?: return
+            if (player.duration > 0) progressCallback(player.currentPosition.coerceAtLeast(0L), player.duration)
+            selectEpisodeCallback(target)
+            return
+        }
+        val session = orbitSession ?: return
+        orbitActionLoading = true; orbitActionError = null
+        playerScope.launch {
+            try {
+                val target = if (forward) session.discovery.next(orbitSelection.episode.id)
+                    else session.discovery.episodes.getOrNull(currentOrbitIndex - 1)
+                if (target == null) { orbitActionError = if (forward) "已经是最后一集" else "已经是第一集"; return@launch }
+                val result = session.resolve(orbitSelection, target)
+                if (currentOrbitSelection == orbitSelection && player.currentMediaItem?.mediaId == playbackId) {
+                    if (player.duration > 0) progressCallback(player.currentPosition.coerceAtLeast(0L), player.duration)
+                    preloadGeneration++; queuedNext = null; lastKnownDuration = 0L
+                    player.setMediaItem(playbackMediaItem(result.episode.url, orbitPlaybackIdentity(result.orbitSelection, result.episode.url)))
+                    player.prepare(); player.playWhenReady = true
+                    autoNextCallback(result)
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { orbitActionError = "无法加载选集，请重试" }
+            finally { orbitActionLoading = false }
+        }
+    }
+    val previousCallback = rememberUpdatedState<() -> Unit>({ changeEpisode(false) })
+    val nextCallback = rememberUpdatedState<() -> Unit>({ changeEpisode(true) })
 
     var controllerVisible by remember { mutableStateOf(false) }
     var backPressedAt by remember(playbackId) { mutableStateOf<Long?>(null) }
@@ -2726,10 +2760,11 @@ private fun PlayerSurface(
             factory = { viewContext ->
                 EpisodeAwarePlayerView(viewContext).apply {
                     useController = true
-                    controllerAutoShow = true
+                    controllerAutoShow = false
                     controllerHideOnTouch = false
                     setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
                         controllerVisible = visibility == android.view.View.VISIBLE
+                        if (controllerVisible) post { configureEpisodeButtons() }
                     })
                     this.player = player
                     setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
@@ -2750,6 +2785,13 @@ private fun PlayerSurface(
                         true
                     } else false
                 }
+                (view as EpisodeAwarePlayerView).apply {
+                    previousEnabled = canGoPrevious && !orbitActionLoading
+                    nextEnabled = canGoNext && !orbitActionLoading
+                    onPreviousPressed = { previousCallback.value() }
+                    onNextPressed = { nextCallback.value() }
+                    configureEpisodeButtons()
+                }
                 playerView = view
             },
             onRelease = { view ->
@@ -2766,6 +2808,10 @@ private fun PlayerSurface(
                 color = Color.White,
                 fontSize = 16.sp
             )
+        }
+        if (orbitActionError != null && !showEpisodePanel) {
+            Text(orbitActionError!!, Modifier.align(Alignment.Center).clip(RoundedCornerShape(8.dp))
+                .background(Color(0xE0202935)).padding(14.dp), color = Color.White, fontSize = 14.sp)
         }
         if (controllerVisible) {
             Column(Modifier.align(Alignment.TopStart).padding(28.dp)) {
@@ -2936,7 +2982,25 @@ private fun playbackMediaItem(url: String, mediaId: String = url): PlayerMediaIt
 }
 
 @UnstableApi
-private class EpisodeAwarePlayerView(context: android.content.Context) : PlayerView(context) {
+internal class EpisodeAwarePlayerView(context: android.content.Context) : PlayerView(context) {
+    var previousEnabled = false
+    var nextEnabled = false
+    var onPreviousPressed: (() -> Unit)? = null
+    var onNextPressed: (() -> Unit)? = null
+    private var consumedKey: Int? = null
+    fun configureEpisodeButtons() {
+        setShowPreviousButton(true); setShowNextButton(true)
+        findViewById<android.view.View>(androidx.media3.ui.R.id.exo_prev)?.apply {
+            isEnabled = previousEnabled; alpha = if (previousEnabled) 1f else .35f
+            setOnClickListener { onPreviousPressed?.invoke() }
+            contentDescription = "上一集"
+        }
+        findViewById<android.view.View>(androidx.media3.ui.R.id.exo_next)?.apply {
+            isEnabled = nextEnabled; alpha = if (nextEnabled) 1f else .35f
+            setOnClickListener { onNextPressed?.invoke() }
+            contentDescription = "下一集"
+        }
+    }
     var onDownPressed: (() -> Boolean)? = null
     private var touchStartY = Float.NaN
     private var seekingKey: Int? = null
@@ -2957,6 +3021,29 @@ private class EpisodeAwarePlayerView(context: android.content.Context) : PlayerV
     }
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_UP && consumedKey == event.keyCode) {
+            consumedKey = null
+            return true
+        }
+        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+            if (consumedKey == event.keyCode) return true
+            if (event.repeatCount == 0 && !isControllerFullyVisible &&
+                event.keyCode in setOf(android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER, android.view.KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+                player?.let { if (it.playWhenReady) it.pause() else it.play() }
+                consumedKey = event.keyCode
+                return true
+            }
+            if (event.repeatCount == 0 && !isControllerFullyVisible && event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP) {
+                showController()
+                post { configureEpisodeButtons() }
+                consumedKey = event.keyCode
+                return true
+            }
+            if (event.repeatCount == 0 && event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN && onDownPressed?.invoke() == true) {
+                consumedKey = event.keyCode
+                return true
+            }
+        }
         if (event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT ||
             event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT
         ) {
@@ -2981,10 +3068,6 @@ private class EpisodeAwarePlayerView(context: android.content.Context) : PlayerV
                 }
             }
         }
-        if (event.action == android.view.KeyEvent.ACTION_DOWN &&
-            event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN &&
-            onDownPressed?.invoke() == true
-        ) return true
         return super.dispatchKeyEvent(event)
     }
 }
