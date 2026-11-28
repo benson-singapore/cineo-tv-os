@@ -18,32 +18,59 @@ internal class HubSyncActions(
     suspend fun pullAndApply(trigger: SyncTrigger): SyncStatus = pull(trigger)
     suspend fun pushThenPull(): SyncStatus {
         val pushed = pushAll(SyncTrigger.FULL_PUSH)
-        if (pushed.label != "推送完成") return pushed
-        return pullAndApply(SyncTrigger.MANUAL_PULL)
+        if (pushed.label !in setOf("推送完成", "推送部分完成")) return pushed
+        val pulled = pullAndApply(SyncTrigger.MANUAL_PULL)
+        if (pushed.label == "推送部分完成" && pulled.label == "已拉取") {
+            return SyncStatus("同步部分完成", "云端数据已更新；部分更改暂未同步。")
+        }
+        return pulled
     }
+}
+
+internal suspend fun refreshCloudComponents(
+    applySettings: suspend () -> Unit,
+    refreshOrbit: () -> Unit,
+    verifyBinding: () -> Unit
+): List<String> {
+    val settingsError = try {
+        applySettings()
+        null
+    } catch (failure: HubApiException) {
+        if (failure.failure == HubFailure.DeviceRevoked) throw failure
+        "云端设置更新失败"
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (_: Exception) { "云端设置更新失败" }
+    verifyBinding()
+    val orbitError = try {
+        refreshOrbit()
+        null
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (_: Exception) { "Orbit 插件更新失败" }
+    verifyBinding()
+    return listOfNotNull(settingsError, orbitError)
 }
 
 internal fun fullPushCompletion(sent: Int, ignored: Int, failed: Int, skipped: Int): SyncStatus =
     if (skipped > 0) SyncStatus("推送部分完成", "成功 $sent 条；被忽略 $ignored 条；失败 $failed 条；跳过 $skipped 条观看记录（来源、剧集身份或待同步记录冲突），本地记录已保留")
     else SyncStatus("推送完成", "成功 $sent 条；被忽略 $ignored 条；失败 $failed 条")
 
-internal data class PendingSinglePush(val envelope: SyncEnvelope, val trigger: SyncTrigger)
+internal data class PendingSinglePush(val envelope: SyncEnvelope, val trigger: SyncTrigger, val bindingInstance: String = "")
 
 internal class PendingSinglePushes {
-    private val pending = LinkedHashMap<Pair<String, String>, PendingSinglePush>()
+    private val pending = LinkedHashMap<Triple<String, String, String>, PendingSinglePush>()
 
     @Synchronized
-    fun put(envelope: SyncEnvelope, trigger: SyncTrigger) {
-        pending[envelope.entity to envelope.key] = PendingSinglePush(envelope, trigger)
+    fun put(envelope: SyncEnvelope, trigger: SyncTrigger, bindingInstance: String = "") {
+        pending[Triple(bindingInstance, envelope.entity, envelope.key)] = PendingSinglePush(envelope, trigger, bindingInstance)
     }
 
     @Synchronized
     fun isEmpty(): Boolean = pending.isEmpty()
 
     @Synchronized
-    fun drain(): List<Pair<SyncEnvelope, SyncTrigger>> = pending.values
-        .map { it.envelope to it.trigger }
-        .also { pending.clear() }
+    fun drain(): List<PendingSinglePush> = pending.values.toList().also { pending.clear() }
 }
 
 internal fun decodeOutboxPayload(raw: String?): Map<String, Any?>? = raw?.let { org.json.JSONObject(it).toMap() }
@@ -84,6 +111,39 @@ internal data class SyncEnvelope(
     val baselineAt: Long? = null
 )
 
+internal data class QuarantinedSyncRecord(
+    val id: Long, val entity: String, val key: String, val updatedAt: Long,
+    val deleted: Boolean, val payloadJson: String?, val generation: Long?,
+    val baselineAt: Long?, val previousBinding: String
+)
+
+/** A user may choose an account, but cannot make an ambiguous object identity valid. */
+internal fun quarantineRestoreError(record: QuarantinedSyncRecord): String? {
+    if (record.entity !in setOf("site", "favorite", "history", "progress")) return "此记录类型不支持恢复"
+    if (record.deleted) return "删除记录没有足够的对象身份信息；请核对目标后在对应页面重新执行删除"
+    if (record.key.isBlank() || record.key.toByteArray(Charsets.UTF_8).size > 1024 || record.updatedAt < 0) return "记录键或时间无效"
+    val raw = record.payloadJson ?: return "记录缺少内容，无法确认身份"
+    if (raw.toByteArray(Charsets.UTF_8).size > 16384) return "记录内容超过常用 Hub 限制，请在对应页面重新操作"
+    val payload = runCatching { org.json.JSONObject(raw).toMap() }.getOrNull() ?: return "记录内容格式无效"
+    if (record.entity in setOf("favorite", "history", "progress")) {
+        val video = payload["video"] as? Map<*, *>
+        if (listOf("id", "remoteId").any { (video?.get(it) as? String)?.startsWith("orbit:") == true })
+            return "Orbit 记录不能恢复到默认同步历史"
+    }
+    val valid = when (record.entity) {
+        "site" -> (payload["api"] as? String)?.let { runCatching { hubSourceKey(it) == record.key }.getOrDefault(false) } == true
+        "favorite" -> {
+            val source = payload["source_api"] as? String
+            val video = payload["video"] as? Map<*, *>
+            val remote = video?.get("remoteId") as? String
+            source != null && !remote.isNullOrBlank() && !remote.startsWith("orbit:") &&
+                runCatching { "${hubSourceKey(source)}:${syncEncode(remote)}" == record.key }.getOrDefault(false)
+        }
+        else -> hasTrustedWatchIdentity(SyncEnvelope(record.entity, record.key, record.updatedAt, false, payload))
+    }
+    return if (valid) null else "记录身份无法确认；请在对应页面重新操作"
+}
+
 /** Old unmarked watch envelopes may contain title-guessed episode indices.
  * Retain them for explicit resolution rather than sending or discarding them. */
 internal fun hasTrustedWatchIdentity(item: SyncEnvelope): Boolean {
@@ -110,11 +170,10 @@ internal fun partitionWatchOutbox(items: List<SyncEnvelope>): Pair<List<SyncEnve
         return if (parts.size in setOf(2, 4) && parts[0].isNotBlank() && parts[1].isNotBlank())
             "${parts[0]}:${parts[1]}" else null
     }
-    val unknown = uncertain.any { filmKey(it) == null }
     val heldFilms = uncertain.mapNotNull(::filmKey).toSet()
     return items.partition { item ->
         hasTrustedWatchIdentity(item) && (item.entity !in setOf("history", "progress") ||
-            (!unknown && filmKey(item) !in heldFilms))
+            filmKey(item) !in heldFilms)
     }
 }
 

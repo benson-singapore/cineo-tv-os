@@ -14,12 +14,17 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+// Shared by credential transitions, settings commits and TMDB cache access.
+internal object TmdbAccessGate { val lock = Any() }
+
 internal data class HubHttpReply(val status: Int, val envelope: HubEnvelopeResult, val retryAfterSeconds: Long?)
 
 internal class DeviceCredentialStore(context: Context) {
-    private val preferences = context.applicationContext.getSharedPreferences("cineo_hub_device", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val preferences = appContext.getSharedPreferences("cineo_hub_device", Context.MODE_PRIVATE)
     val isBound: Boolean get() = preferences.contains(DEVICE_ID) && readToken() != null
     val deviceId: String? get() = preferences.getString(DEVICE_ID, null)
+    val bindingInstance: String get() = preferences.getString(BINDING_INSTANCE, null) ?: "legacy"
     val hubUrl: String? get() = preferences.getString(HUB_URL, null)
     val lastSyncAt: Long get() = preferences.getLong(LAST_SYNC_AT, 0L)
     val lastFailure: String? get() = preferences.getString(LAST_FAILURE, null)
@@ -28,13 +33,14 @@ internal class DeviceCredentialStore(context: Context) {
     val generation: Long get() = preferences.getLong(GENERATION, 0L)
 
     fun saveHubAddress(url: String) { preferences.edit().putString(HUB_URL, url.trim().trimEnd('/')).apply() }
-    fun save(hubUrl: String, deviceId: String, token: String) {
+    fun save(hubUrl: String, deviceId: String, token: String) = synchronized(TmdbAccessGate.lock) {
         val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, getOrCreateKey()) }
         val encrypted = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
         preferences.edit().putString(HUB_URL, hubUrl).putString(DEVICE_ID, deviceId)
+            .putString(BINDING_INSTANCE, java.util.UUID.randomUUID().toString())
             .putString(TOKEN_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .putString(TOKEN_CIPHER, Base64.encodeToString(encrypted, Base64.NO_WRAP))
-            .putBoolean(REVOKED, false).putString(LAST_FAILURE, null).putLong(CURSOR, 0L).putLong(GENERATION, 0L).apply()
+            .putBoolean(REVOKED, false).putString(LAST_FAILURE, null).putLong(CURSOR, 0L).putLong(GENERATION, 0L).commit().also { check(it) { "无法保存设备绑定" } }
     }
 
     fun readToken(): String? {
@@ -52,10 +58,18 @@ internal class DeviceCredentialStore(context: Context) {
     }
     fun markSuccess(now: Long) { preferences.edit().putLong(LAST_SYNC_AT, now).putString(LAST_FAILURE, null).apply() }
     fun markFailure(message: String) { preferences.edit().putString(LAST_FAILURE, safeFailureMessage(message)).apply() }
-    fun markRevoked() { preferences.edit().putBoolean(REVOKED, true).putString(LAST_FAILURE, null).apply() }
-    fun clearLocalBinding() {
+    fun markRevoked() = synchronized(TmdbAccessGate.lock) {
+        // Either durable revocation or durable invalidation is sufficient to
+        // prevent old cloud settings after a crash. Attempt both independently.
+        val invalidated = runCatching {
+            CineoDatabase(appContext).use { it.invalidateHubSettings(revoked = true) }
+        }.isSuccess
+        val revokedSaved = preferences.edit().putBoolean(REVOKED, true).putString(LAST_FAILURE, null).commit()
+        check(invalidated || revokedSaved) { "无法保存撤销状态，请重新绑定" }
+    }
+    fun clearLocalBinding() = synchronized(TmdbAccessGate.lock) {
         preferences.edit().remove(DEVICE_ID).remove(TOKEN_IV).remove(TOKEN_CIPHER)
-            .remove(CURSOR).remove(GENERATION).remove(REVOKED).remove(LAST_FAILURE).remove(LAST_SYNC_AT).apply()
+            .remove(CURSOR).remove(GENERATION).remove(BINDING_INSTANCE).remove(REVOKED).remove(LAST_FAILURE).remove(LAST_SYNC_AT).apply()
     }
 
     private fun getOrCreateKey(): SecretKey {
@@ -73,6 +87,7 @@ internal class DeviceCredentialStore(context: Context) {
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val HUB_URL = "hub_url"
         const val DEVICE_ID = "device_id"
+        const val BINDING_INSTANCE = "binding_instance"
         const val TOKEN_IV = "token_iv"
         const val TOKEN_CIPHER = "token_ciphertext"
         const val LAST_SYNC_AT = "last_sync_at"
@@ -110,6 +125,7 @@ internal class HubSyncApi(private val credentials: DeviceCredentialStore) {
     private fun path(path: String): String = endpoint(credentials.hubUrl ?: error("Hub 地址未设置"), path)
 
     private fun request(method: String, url: String, body: JSONObject? = null, token: String? = credentials.readToken(), trigger: SyncTrigger? = null): HubHttpReply {
+        val bindingAtStart = if (token != null) credentials.bindingInstance else null
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = method
@@ -124,9 +140,15 @@ internal class HubSyncApi(private val credentials: DeviceCredentialStore) {
                 connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
             }
             val status = connection.responseCode
+            if (bindingAtStart != null && (credentials.bindingInstance != bindingAtStart || credentials.revoked)) {
+                throw IllegalStateException("绑定已变更，忽略旧请求结果")
+            }
             val response = (if (status in 200..399) connection.inputStream else connection.errorStream)
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             val retryAfter = connection.getHeaderField("Retry-After")?.toLongOrNull()
+            if (bindingAtStart != null && (credentials.bindingInstance != bindingAtStart || credentials.revoked)) {
+                throw IllegalStateException("绑定已变更，忽略旧请求结果")
+            }
             val parsed = parseHubEnvelope(response, status)
             val normalized = if (!parsed.successful && parsed.failure is HubFailure.Api && retryAfter != null) {
                 parsed.copy(failure = parsed.failure.copy(retryAfterSeconds = retryAfter))

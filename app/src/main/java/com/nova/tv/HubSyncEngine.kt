@@ -17,7 +17,8 @@ private class UnresolvedWatchOutbox : IllegalStateException()
 internal class HubSyncEngine(
     context: Context,
     private val repository: MacCmsRepository,
-    private val tmdbSettings: TmdbSettingsStore
+    private val tmdbSettings: TmdbSettingsStore,
+    private val orbitRepository: OrbitPluginRepository? = null
 ) {
     val credentials = DeviceCredentialStore(context.applicationContext)
     private val api = HubSyncApi(credentials)
@@ -36,15 +37,29 @@ internal class HubSyncEngine(
     private val favoritePushJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
     private val actions = HubSyncActions(::pushOutbox, ::pullAndApply) { trigger -> pushAll(trigger = trigger) }
 
-    suspend fun bind(baseUrl: String, pin: String): SyncStatus = withContext(Dispatchers.IO) {
+    suspend fun bind(baseUrl: String, pin: String): SyncStatus {
         val normalizedPin = pin.filter(Char::isDigit)
         require(normalizedPin.length == 8) { "请输入完整的 8 位 PIN" }
-        val result = api.bind(baseUrl, normalizedPin, android.os.Build.MODEL.orEmpty())
-        database.clearWatchConfirmations()
-        credentials.save(baseUrl.trim().trimEnd('/'), result.getString("device_id"), result.getString("device_token"))
-        database.writeSyncState(mapOf("bound_at" to System.currentTimeMillis().toString(), "device_id" to result.getString("device_id"), "generation" to "0", "baseline_at" to "0"))
-        repository.enqueueLocalSyncSnapshot()
-        syncNow()
+        mutex.withLock { withContext(Dispatchers.IO) {
+            val result = api.bind(baseUrl, normalizedPin, android.os.Build.MODEL.orEmpty())
+            retryJob?.cancel()
+            synchronized(TmdbAccessGate.lock) {
+                database.beginBindingTransition()
+                credentials.save(baseUrl.trim().trimEnd('/'), result.getString("device_id"), result.getString("device_token"))
+                database.activateBinding(credentials.bindingInstance, result.getString("device_id"))
+            }
+        } }
+        // Existing local data has no proven account ownership. Only changes
+        // made after this binding are eligible for automatic push.
+        return syncNow()
+    }
+
+    internal fun bindingReady(): Boolean = credentials.isBound && !credentials.revoked &&
+        database.bindingMatches(credentials.bindingInstance)
+
+    private fun requireBinding(): String {
+        check(bindingReady()) { "绑定状态不一致，请重新绑定；旧数据已保留" }
+        return credentials.bindingInstance
     }
 
     suspend fun syncNow(): SyncStatus = actions.pushThenPull()
@@ -52,6 +67,7 @@ internal class HubSyncEngine(
     suspend fun pushOutbox(trigger: SyncTrigger): SyncStatus {
         if (!credentials.isBound) return SyncStatus("未绑定")
         if (credentials.revoked) return SyncStatus("已解绑", "设备已解绑，请重新绑定")
+        val requestedBinding = credentials.bindingInstance
         if (!isSyncing.compareAndSet(false, true)) {
             pendingPush.set(true)
             requestPendingPush()
@@ -61,6 +77,7 @@ internal class HubSyncEngine(
         val status = try {
             mutex.withLock { withContext(Dispatchers.IO) {
                 try {
+                    check(requireBinding() == requestedBinding) { "绑定已变更" }
                     val held = pushPending(trigger)
                     if (held > 0) return@withContext SyncStatus("推送部分完成", "已保留 $held 条身份不明确或存在关联冲突的待同步记录")
                     failureCount = 0
@@ -94,13 +111,14 @@ internal class HubSyncEngine(
             isSyncing.set(false)
             if (pendingPush.get() || pendingFullPush.get() || pendingPull.get() || !pendingSinglePushes.isEmpty()) requestPendingPush()
         }
-        if (status.label == "推送失败") scheduleRetry(retryAfter)
+        if (status.label == "推送失败") scheduleRetry(retryAfter, requestedBinding = requestedBinding)
         return status
     }
 
     suspend fun pullAndApply(trigger: SyncTrigger): SyncStatus {
         if (!credentials.isBound) return SyncStatus("未绑定")
         if (credentials.revoked) return SyncStatus("已解绑", "设备已解绑，请重新绑定")
+        val requestedBinding = credentials.bindingInstance
         if (!isSyncing.compareAndSet(false, true)) {
             pendingPull.set(true)
             pendingPullTrigger.set(trigger)
@@ -110,13 +128,27 @@ internal class HubSyncEngine(
         val status = try {
             mutex.withLock { withContext(Dispatchers.IO) {
                 try {
+                    check(requireBinding() == requestedBinding) { "绑定已变更" }
                     try { pullPages(trigger) } catch (failure: HubApiException) {
                         if (failure.failure != HubFailure.ResyncRequired) throw failure
                         rebuildSnapshot(trigger)
                     }
-                    applyCloudSettings(trigger)
-                    credentials.markSuccess(System.currentTimeMillis())
-                    SyncStatus("已拉取", "云端数据与设置已应用")
+                    val errors = refreshCloudComponents(
+                        applySettings = { applyCloudSettings(trigger) },
+                        refreshOrbit = { orbitRepository?.refreshPlugins() },
+                        verifyBinding = {
+                            if (credentials.revoked) throw HubApiException(HubFailure.DeviceRevoked)
+                            check(requireBinding() == requestedBinding) { "绑定已变更" }
+                        }
+                    )
+                    if (errors.isNotEmpty()) {
+                        val message = errors.joinToString("；")
+                        credentials.markFailure(message)
+                        SyncStatus("部分更新", message)
+                    } else {
+                        credentials.markSuccess(System.currentTimeMillis())
+                        SyncStatus("已拉取", "云端数据、设置及 Orbit 插件已更新")
+                    }
                 } catch (failure: HubApiException) {
                     if (failure.failure == HubFailure.DeviceRevoked) credentials.markRevoked()
                     val message = (failure.failure as? HubFailure.Api)?.let(::userMessage) ?: "云端拉取失败"
@@ -135,6 +167,7 @@ internal class HubSyncEngine(
     }
 
     suspend fun pushAll(onProgress: (Int, Int) -> Unit = { _, _ -> }, trigger: SyncTrigger = SyncTrigger.FULL_PUSH): SyncStatus {
+        val requestedBinding = credentials.bindingInstance
         if (!isSyncing.compareAndSet(false, true)) {
             pendingFullPush.set(true)
             requestPendingPush()
@@ -142,7 +175,8 @@ internal class HubSyncEngine(
         }
         return try {
             mutex.withLock { withContext(Dispatchers.IO) {
-                val skippedHistory = repository.enqueueLocalSyncSnapshot()
+                check(requireBinding() == requestedBinding) { "绑定已变更" }
+                val skippedHistory = 0
                 val baselineAt = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
                 val pending = database.syncOutboxCount(credentials.generation, baselineAt)
                 var sent = 0
@@ -202,7 +236,7 @@ internal class HubSyncEngine(
                         pendingFullPush.getAndSet(false) -> pushAll(trigger = SyncTrigger.FULL_PUSH)
                         pendingPull.getAndSet(false) -> pullAndApply(pendingPullTrigger.getAndSet(null) ?: SyncTrigger.MANUAL_PULL)
                         !pendingSinglePushes.isEmpty() -> {
-                            pendingSinglePushes.drain().forEach { (item, trigger) -> pushSingle(item, trigger) }
+                            pendingSinglePushes.drain().forEach { entry -> pushSingle(entry.envelope, entry.trigger, entry.bindingInstance) }
                         }
                         pendingPush.getAndSet(false) -> pushOutbox(SyncTrigger.RETRY)
                     }
@@ -214,14 +248,22 @@ internal class HubSyncEngine(
         }
     }
 
-    private fun scheduleRetry(retryAfterSeconds: Long?, item: SyncEnvelope? = null) {
+    private fun scheduleRetry(retryAfterSeconds: Long?, item: SyncEnvelope? = null, requestedBinding: String = credentials.bindingInstance) {
         retryJob?.cancel()
         val delayMillis = nextRetryDelayMillis(retryAfterSeconds)
-        database.writeSyncState(mapOf("progress_next_allowed_at" to (System.currentTimeMillis() + delayMillis).toString()))
         retryJob = retryScope.launch {
+            val valid = mutex.withLock {
+                if (credentials.bindingInstance != requestedBinding || !bindingReady()) false
+                else {
+                    database.writeSyncState(mapOf("progress_next_allowed_at" to (System.currentTimeMillis() + delayMillis).toString()))
+                    true
+                }
+            }
+            if (!valid) return@launch
             delay(delayMillis)
+            if (credentials.bindingInstance != requestedBinding) return@launch
             if (item == null) pushOutbox(SyncTrigger.RETRY)
-            else pushSingle(item, SyncTrigger.RETRY)
+            else pushSingle(item, SyncTrigger.RETRY, requestedBinding)
         }
     }
 
@@ -251,6 +293,7 @@ internal class HubSyncEngine(
     suspend fun syncProgressIfDue(key: String?) {
         if (key == null) return
         if (!credentials.isBound || credentials.revoked) return
+        val requestedBinding = credentials.bindingInstance
         val seconds = database.readAppSetting("progress_push_interval_seconds")?.toIntOrNull()
         val interval = progressIntervalMillis(seconds)
         val now = System.currentTimeMillis()
@@ -263,23 +306,30 @@ internal class HubSyncEngine(
         val currentPosition = (progress.payload?.get("position_ms") as? Number)?.toLong() ?: progress.updatedAt
         val lastUploaded = database.readSyncState("last_uploaded_progress_value:${progress.key}").toLongOrNull()
         if (!progressChanged(lastUploaded, currentPosition)) return
-        database.writeSyncState(mapOf("last_progress_upload_at" to now.toString()))
-        val result = pushSingle(progress, SyncTrigger.AUTO_PROGRESS)
-        if (result) {
-            database.writeSyncState(mapOf("progress_next_allowed_at" to "0",
-                "last_uploaded_progress_value:${progress.key}" to currentPosition.toString()))
+        val valid = mutex.withLock {
+            if (!bindingReady() || credentials.bindingInstance != requestedBinding) false
+            else { database.writeSyncState(mapOf("last_progress_upload_at" to now.toString())); true }
+        }
+        if (!valid) return
+        val result = pushSingle(progress, SyncTrigger.AUTO_PROGRESS, requestedBinding)
+        if (result) mutex.withLock {
+            if (bindingReady() && credentials.bindingInstance == requestedBinding) {
+                database.writeSyncState(mapOf("progress_next_allowed_at" to "0",
+                    "last_uploaded_progress_value:${progress.key}" to currentPosition.toString()))
+            }
         }
     }
 
-    private suspend fun pushSingle(item: SyncEnvelope, trigger: SyncTrigger): Boolean {
+    private suspend fun pushSingle(item: SyncEnvelope, trigger: SyncTrigger, requestedBinding: String = credentials.bindingInstance): Boolean {
         if (!hasTrustedWatchIdentity(item)) return false
         if (!isSyncing.compareAndSet(false, true)) {
-            pendingSinglePushes.put(item, trigger)
+            pendingSinglePushes.put(item, trigger, requestedBinding)
             requestPendingPush()
             return false
         }
         return try {
             mutex.withLock { withContext(Dispatchers.IO) {
+                if (requireBinding() != requestedBinding) return@withContext false
                 val baseline = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
                 val queued = database.readSyncOutbox(Int.MAX_VALUE, credentials.generation, baseline)
                 if (partitionWatchOutbox(queued + item).first.none { it === item }) return@withContext false
@@ -293,17 +343,21 @@ internal class HubSyncEngine(
             } }
         } catch (failure: HubApiException) {
             if (failure.failure == HubFailure.DeviceRevoked) {
-                credentials.markRevoked()
-                retryJob?.cancel()
+                mutex.withLock {
+                    if (credentials.bindingInstance == requestedBinding) {
+                        credentials.markRevoked()
+                        retryJob?.cancel()
+                    }
+                }
             } else {
                 val retryAfter = (failure.failure as? HubFailure.Api)?.retryAfterSeconds
                 failureCount++
-                if (item.entity != "progress") scheduleRetry(retryAfter, item)
+                if (item.entity != "progress") scheduleRetry(retryAfter, item, requestedBinding)
             }
             false
         } catch (_: Exception) {
             failureCount++
-            if (item.entity != "progress") scheduleRetry(null, item)
+            if (item.entity != "progress") scheduleRetry(null, item, requestedBinding)
             false
         } finally {
             isSyncing.set(false)
@@ -311,23 +365,41 @@ internal class HubSyncEngine(
         }
     }
 
+    internal data class RecoveryBinding(val instance: String, val hubUrl: String?, val deviceId: String?)
+
+    internal fun recoveryBinding(): RecoveryBinding? = if (bindingReady())
+        RecoveryBinding(credentials.bindingInstance, credentials.hubUrl, credentials.deviceId) else null
+
+    suspend fun quarantinePage(beforeId: Long?): List<QuarantinedSyncRecord> = mutex.withLock { withContext(Dispatchers.IO) {
+        if (bindingReady()) {
+            val baseline = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
+            database.quarantineStaleOutbox(credentials.generation, baseline, credentials.bindingInstance)
+            database.quarantineUntrustedWatch(credentials.bindingInstance)
+        } else if (database.readSyncState("binding_instance").isNotBlank()) {
+            database.beginBindingTransition()
+        }
+        database.quarantinePage(beforeId)
+    } }
+
+    suspend fun restoreQuarantined(record: QuarantinedSyncRecord, selectedBinding: RecoveryBinding?): String? = mutex.withLock { withContext(Dispatchers.IO) {
+        if (selectedBinding == null || recoveryBinding() != selectedBinding) return@withContext "绑定已变更，请重新核对当前账号"
+        database.restoreQuarantined(record, selectedBinding.instance)
+    } }
+
     fun staleOutboxCount(): Int {
         val baseline = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
-        return database.staleSyncOutboxCount(credentials.generation, baseline)
+        return database.quarantinedOutboxCount() + if (bindingReady()) {
+            database.staleSyncOutboxCount(credentials.generation, baseline) + database.untrustedWatchCount(credentials.generation, baseline)
+        } else database.syncOutboxTotal()
     }
 
-    fun discardStaleOutbox(): Int {
-        val baseline = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
-        return database.discardStaleSyncOutbox(credentials.generation, baseline)
-    }
-
-    fun removeLocalBinding() {
+    suspend fun removeLocalBinding() = mutex.withLock { withContext(Dispatchers.IO) {
         retryJob?.cancel()
-        credentials.clearLocalBinding()
-        database.clearSyncOutbox()
-        database.clearSyncBindingState()
-        database.clearHubManagedSettings()
-    }
+        synchronized(TmdbAccessGate.lock) {
+            database.beginBindingTransition()
+            credentials.clearLocalBinding()
+        }
+    } }
 
     suspend fun syncAfterPlaybackPause(key: String?) = pushLatestProgress(key)
 
@@ -336,13 +408,16 @@ internal class HubSyncEngine(
     private suspend fun pushLatestProgress(key: String?) {
         if (key == null) return
         if (!credentials.isBound || credentials.revoked) return
+        val requestedBinding = credentials.bindingInstance
         val baselineAt = database.readSyncState("baseline_at", "0").toLongOrNull() ?: 0L
         val progress = partitionWatchOutbox(database.readSyncOutbox(Int.MAX_VALUE, credentials.generation, baselineAt))
             .first.firstOrNull { it.entity == "progress" && it.key == key } ?: return
         val position = (progress.payload?.get("position_ms") as? Number)?.toLong() ?: progress.updatedAt
-        if (pushSingle(progress, SyncTrigger.AUTO_PROGRESS)) {
-            database.writeSyncState(mapOf("last_progress_upload_at" to System.currentTimeMillis().toString(),
-                "last_uploaded_progress_value:${progress.key}" to position.toString()))
+        if (pushSingle(progress, SyncTrigger.AUTO_PROGRESS, requestedBinding)) mutex.withLock {
+            if (bindingReady() && credentials.bindingInstance == requestedBinding) {
+                database.writeSyncState(mapOf("last_progress_upload_at" to System.currentTimeMillis().toString(),
+                    "last_uploaded_progress_value:${progress.key}" to position.toString()))
+            }
         }
     }
 
@@ -447,18 +522,15 @@ internal class HubSyncEngine(
     }
 
     private suspend fun applyCloudSettings(trigger: SyncTrigger) {
+        val binding = requireBinding()
+        // Fail closed before network or either durable store changes. A failed
+        // fetch, empty response, process death or credential write stays closed.
+        database.invalidateHubSettings()
         val reply = api.settings(trigger)
         requireSuccess(reply)
-        val data = reply.envelope.data ?: return
-        if (!data.isNull("tmdb_key")) {
-            val key = data.optString("tmdb_key").takeIf(String::isNotBlank)
-            if (key != null) tmdbSettings.saveToken(key) else tmdbSettings.clearToken()
-        } else tmdbSettings.clearToken()
-        val prefs = data.optJSONObject("preferences") ?: JSONObject()
-        database.writeAppSettings(mapOf(
-            "hub.tmdb_language" to prefs.optString("tmdb_language", "zh-CN"),
-            "hub.include_adult" to prefs.optBoolean("include_adult", false).toString()
-        ))
+        val data = reply.envelope.data ?: throw IllegalStateException("云端设置为空")
+        check(requireBinding() == binding) { "绑定已变更" }
+        tmdbSettings.applyCloudValues(binding, data)
     }
 
     private fun requireSuccess(reply: HubHttpReply) {

@@ -43,6 +43,7 @@ class WatchSnapshotInstrumentedTest {
         context = IsolatedDatabaseContext(instrumentationContext, "snapshot-qa-${UUID.randomUUID()}")
         check(context.getDatabasePath("cineo_tv.db").parentFile!!.let { it.isDirectory || it.mkdirs() })
         db = CineoDatabase(context)
+        db.activateBinding("snapshot-test-binding", "snapshot-test-device")
         repo = MacCmsRepository(context)
         engine = HubSyncEngine(context, repo, TmdbSettingsStore(context))
         repo.saveSource(source)

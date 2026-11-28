@@ -14,6 +14,7 @@ import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -32,6 +33,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1010,6 +1013,233 @@ fun LocalVideoListScreen(
 }
 
 @Composable
+internal fun OrbitAccessGate(settings: OrbitLocalSettings, focus: FocusRequester, menuFocusRequester: FocusRequester, onUnlocked: () -> Unit) {
+    var password by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf(false) }
+    val verifyFocus = remember { FocusRequester() }
+    Box(Modifier.fillMaxSize().padding(start = 108.dp, end = 40.dp, top = 24.dp, bottom = 24.dp)
+        .verticalScroll(rememberScrollState()), contentAlignment = Alignment.Center) {
+        Column(Modifier.widthIn(max = 480.dp).fillMaxWidth().clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFF141C27)).border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(18.dp))
+            .padding(horizontal = 28.dp, vertical = 26.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Box(Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(AccentGold.copy(alpha = .13f)), contentAlignment = Alignment.Center) {
+                    Image(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(23.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(AccentGold))
+                }
+                Column {
+                    Text("Orbit", color = AccentGold, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text(if (settings.enabled) "访问验证" else "Orbit 已停用", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(if (settings.enabled) "请输入访问密码以继续。" else "请在设置中启用 Orbit。", color = ScreenMuted, fontSize = 13.sp)
+            if (settings.enabled) {
+                Spacer(Modifier.height(20.dp))
+                InputBox("访问密码", password, { password = it.take(128); error = false },
+                    modifier = Modifier.testTag("orbit-gate-password").focusProperties { left = menuFocusRequester; down = verifyFocus },
+                    inputFocusRequester = focus, obscureText = true)
+                if (error) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("密码不正确，请重试。", modifier = Modifier.testTag("orbit-gate-error"), color = Color(0xFFFFA69A), fontSize = 12.sp)
+                }
+                Spacer(Modifier.height(18.dp))
+                TvActionButton("验证并进入", primary = true, modifier = Modifier.testTag("orbit-gate-verify")
+                    .focusRequester(verifyFocus).focusProperties { up = focus; left = menuFocusRequester }, onClick = {
+                    if (settings.unlock(password)) { password = ""; onUnlocked() } else error = true
+                })
+            }
+        }
+    }
+    LaunchedEffect(Unit) { if (settings.enabled) runCatching { focus.requestFocus() } }
+}
+
+@Composable
+internal fun OrbitSettingsPage(repository: OrbitPluginRepository, entryFocusRequester: FocusRequester, menuFocusRequester: FocusRequester, onOrbitDisabled: (String?) -> Unit) {
+    val settings = repository.localSettings
+    var globalEnabled by remember { mutableStateOf(settings.enabled) }
+    var timeout by remember { mutableIntStateOf(settings.timeoutMinutes) }
+    var oldPassword by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    var passwordMessage by remember { mutableStateOf<String?>(null) }
+    var passwordBusy by remember { mutableStateOf(false) }
+    var showPasswordDialog by remember { mutableStateOf(false) }
+    var showPluginDialog by remember { mutableStateOf(false) }
+    var hasPassword by remember { mutableStateOf(settings.hasPassword) }
+    val timeoutFocus = remember { List(5) { FocusRequester() } }
+    val passwordButtonFocus = remember { FocusRequester() }
+    val oldFocus = remember { FocusRequester() }
+    val newFocus = remember { FocusRequester() }
+    val confirmationFocus = remember { FocusRequester() }
+    val saveFocus = remember { FocusRequester() }
+    val cancelFocus = remember { FocusRequester() }
+    val manageFocus = remember { FocusRequester() }
+    val refreshFocus = remember { FocusRequester() }
+    val pluginCloseFocus = remember { FocusRequester() }
+    var plugins by remember { mutableStateOf(settings.plugins()) }
+    var revision by remember { mutableIntStateOf(0) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val pluginIds = plugins.distinctBy { it.id }.map { it.id }
+    val pluginFocus = remember(pluginIds) { pluginIds.map { FocusRequester() } }
+    fun closePasswordDialog() {
+        if (passwordBusy) return
+        showPasswordDialog = false
+        oldPassword = ""; newPassword = ""; confirmation = ""; passwordMessage = null
+        scope.launch { withFrameNanos { }; runCatching { passwordButtonFocus.requestFocus() } }
+    }
+    fun closePluginDialog() {
+        showPluginDialog = false
+        scope.launch { withFrameNanos { }; runCatching { manageFocus.requestFocus() } }
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Text("Orbit 插件", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text("管理本机的 Orbit 访问与插件。使用插件需要连接 Hub。", color = ScreenMuted, fontSize = 13.sp)
+        Spacer(Modifier.height(20.dp))
+        Row(Modifier.fillMaxWidth().widthIn(max = 680.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Orbit 访问", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(if (globalEnabled) "已启用" else "已停用", color = if (globalEnabled) AccentGold else ScreenMuted, fontSize = 12.sp)
+            }
+            TvActionButton(if (globalEnabled) "停用 Orbit" else "启用 Orbit", modifier = Modifier.testTag("orbit-global").focusRequester(entryFocusRequester).focusProperties { left = menuFocusRequester; down = timeoutFocus[0] }, onClick = {
+                settings.enabled = !globalEnabled; globalEnabled = settings.enabled
+                if (!globalEnabled) onOrbitDisabled(null)
+            })
+        }
+        Spacer(Modifier.height(18.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = .09f)))
+        Spacer(Modifier.height(18.dp))
+        Text("访问密码", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(5.dp))
+        Text(if (hasPassword) "已设置密码；验证后可在所选时长内直接进入。" else "设置密码后，进入 Orbit 时需要验证。", color = ScreenMuted, fontSize = 12.sp)
+        Spacer(Modifier.height(14.dp))
+        Text("免验证时长", color = Color.White.copy(alpha = .84f), fontSize = 13.sp)
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(1, 5, 10, 30, 60).forEachIndexed { index, minutes ->
+                TvActionButton("${minutes}分钟", selected = timeout == minutes, modifier = Modifier.testTag("orbit-timeout-$minutes").focusRequester(timeoutFocus[index]).focusProperties {
+                    up = entryFocusRequester; down = passwordButtonFocus
+                    left = if (index == 0) menuFocusRequester else timeoutFocus[index - 1]
+                    if (index < timeoutFocus.lastIndex) right = timeoutFocus[index + 1]
+                }, onClick = { settings.timeoutMinutes = minutes; timeout = minutes })
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        TvActionButton(if (hasPassword) "修改密码" else "设置密码", modifier = Modifier.testTag("orbit-password-button")
+            .focusRequester(passwordButtonFocus).focusProperties { up = timeoutFocus[0]; down = manageFocus; left = menuFocusRequester }, onClick = {
+            passwordMessage = null; showPasswordDialog = true
+        })
+        Spacer(Modifier.height(22.dp))
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = .09f)))
+        Spacer(Modifier.height(18.dp))
+        Text("插件管理", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(5.dp))
+        Text("查看并管理本机插件。", color = ScreenMuted, fontSize = 12.sp)
+        Spacer(Modifier.height(12.dp))
+        TvActionButton("管理插件", modifier = Modifier.testTag("orbit-manage-plugins").focusRequester(manageFocus)
+            .focusProperties { up = passwordButtonFocus; left = menuFocusRequester }, onClick = {
+                plugins = settings.plugins(); error = null; showPluginDialog = true
+            })
+    }
+    if (showPluginDialog) {
+        Dialog(onDismissRequest = { closePluginDialog() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Column(Modifier.fillMaxWidth(.9f).widthIn(max = 620.dp).heightIn(max = 580.dp)
+                .clip(RoundedCornerShape(14.dp)).background(Color(0xFF151D28))
+                .verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("插件管理", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
+                Text("启用或停用本机插件；配置也会在云同步时更新。", color = ScreenMuted, fontSize = 12.sp)
+                TvActionButton(if (loading) "正在拉取…" else "拉取插件列表", modifier = Modifier.testTag("orbit-refresh")
+                    .focusRequester(refreshFocus).focusProperties { down = pluginFocus.firstOrNull() ?: pluginCloseFocus }, onClick = {
+                    if (!loading) scope.launch {
+                        loading = true; error = null
+                        try { plugins = withContext(Dispatchers.IO) { repository.refreshPlugins() } }
+                        catch (failure: Exception) { error = failure.message ?: "拉取插件列表失败" }
+                        finally { loading = false }
+                    }
+                })
+                error?.let { Text(it, color = Color(0xFFFFA69A), fontSize = 14.sp) }
+                if (plugins.isEmpty()) {
+                    Text("暂无插件", color = Color.White.copy(alpha = .85f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("请先绑定 Hub 并拉取插件列表。", color = ScreenMuted, fontSize = 12.sp)
+                }
+                plugins.distinctBy { it.id }.forEachIndexed { index, plugin ->
+                    val enabled = remember(plugin.id, revision) { settings.isEnabled(plugin.id) }
+                    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(plugin.name, color = Color.White, fontSize = 17.sp)
+                            Text(if (enabled) "已启用" else "已停用", color = ScreenMuted, fontSize = 13.sp)
+                        }
+                        TvActionButton(if (enabled) "停用" else "启用", modifier = Modifier.testTag("orbit-plugin-$index").focusRequester(pluginFocus[index]).focusProperties {
+                            up = if (index == 0) refreshFocus else pluginFocus[index - 1]
+                            down = if (index == pluginFocus.lastIndex) pluginCloseFocus else pluginFocus[index + 1]
+                        }, onClick = {
+                            scope.launch {
+                                val saved = withContext(Dispatchers.IO) { settings.setEnabled(plugin.id, !enabled) }
+                                error = if (saved) null else "插件设置保存失败，请检查存储或设备绑定后重试"
+                                if (saved && enabled) onOrbitDisabled(plugin.id)
+                                revision++
+                            }
+                        })
+                    }
+                }
+                TvActionButton("关闭", modifier = Modifier.testTag("orbit-plugin-close").focusRequester(pluginCloseFocus)
+                    .focusProperties { up = pluginFocus.lastOrNull() ?: refreshFocus }, onClick = { closePluginDialog() })
+            }
+            LaunchedEffect(Unit) { withFrameNanos { }; runCatching { refreshFocus.requestFocus() } }
+        }
+    }
+
+    if (showPasswordDialog) {
+        Dialog(onDismissRequest = { closePasswordDialog() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Column(Modifier.fillMaxWidth(.9f).widthIn(max = 560.dp).heightIn(max = 580.dp)
+                .clip(RoundedCornerShape(14.dp)).background(Color(0xFF151D28))
+                .verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(if (hasPassword) "修改密码" else "设置密码", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.SemiBold)
+                Text(if (hasPassword) "请输入当前密码；新密码留空可清除密码。" else "设置后，进入 Orbit 时需要验证。", color = ScreenMuted, fontSize = 12.sp)
+                if (hasPassword) InputBox("当前密码", oldPassword, { oldPassword = it.take(128) },
+                    modifier = Modifier.testTag("orbit-old-password").focusRequester(oldFocus).focusProperties { down = newFocus }, obscureText = true)
+                InputBox(if (hasPassword) "新密码（留空可清除）" else "新密码", newPassword, { newPassword = it.take(128) },
+                    modifier = Modifier.testTag("orbit-new-password").focusRequester(newFocus).focusProperties { if (hasPassword) up = oldFocus; down = confirmationFocus }, obscureText = true)
+                InputBox("再次输入新密码", confirmation, { confirmation = it.take(128) },
+                    modifier = Modifier.testTag("orbit-confirm-password").focusRequester(confirmationFocus).focusProperties { up = newFocus; down = saveFocus }, obscureText = true)
+                passwordMessage?.let { Text(it, color = Color(0xFFFFA69A), fontSize = 13.sp) }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TvActionButton("取消", modifier = Modifier.testTag("orbit-password-cancel").focusRequester(cancelFocus).focusProperties { up = confirmationFocus; right = saveFocus }, onClick = { closePasswordDialog() })
+                    TvActionButton(if (passwordBusy) "正在保存…" else "保存密码", primary = true,
+                        modifier = Modifier.testTag("orbit-save-password").focusRequester(saveFocus).focusProperties { up = confirmationFocus; left = cancelFocus }, onClick = {
+                        if (!passwordBusy) {
+                            when {
+                                !hasPassword && newPassword.isEmpty() -> passwordMessage = "请输入新密码"
+                                newPassword != confirmation -> passwordMessage = "两次输入的新密码不一致"
+                                else -> {
+                                    passwordBusy = true
+                                    val current = oldPassword
+                                    val next = newPassword
+                                    scope.launch {
+                                        val result = withContext(Dispatchers.IO) {
+                                            if (settings.hasPassword && !settings.verify(current)) "当前密码不正确"
+                                            else if (!settings.setPassword(next)) "密码保存失败，请检查存储后重试"
+                                            else null
+                                        }
+                                        passwordBusy = false
+                                        if (result == null) { hasPassword = settings.hasPassword; closePasswordDialog() }
+                                        else passwordMessage = result
+                                    }
+                                }
+                            }
+                        }
+                    })
+                }
+            }
+            LaunchedEffect(Unit) { withFrameNanos { }; runCatching { (if (hasPassword) oldFocus else newFocus).requestFocus() } }
+        }
+    }
+}
+
+@Composable
 internal fun SettingsScreen(
     update: ReleaseUpdate?,
     updateChecking: Boolean,
@@ -1018,6 +1248,8 @@ internal fun SettingsScreen(
     tmdbSettings: TmdbSettingsStore,
     tmdbRepository: TmdbMetadataRepository,
     hubSyncEngine: HubSyncEngine,
+    orbitRepository: OrbitPluginRepository,
+    onOrbitDisabled: (String?) -> Unit,
     menuSettings: NavigationMenuSettings,
     entryFocusRequester: FocusRequester,
     menuFocusRequester: FocusRequester,
@@ -1093,6 +1325,14 @@ internal fun SettingsScreen(
             }
             Spacer(Modifier.height(8.dp))
             SettingsMenuItem(
+                "Orbit 插件",
+                selected = selectedSetting == "Orbit 插件",
+                modifier = Modifier
+                    .then(if (selectedSetting == "Orbit 插件") Modifier.focusRequester(entryFocusRequester).focusRequester(selectedSettingFocusRequester) else Modifier)
+                    .focusProperties { right = detailEntryFocusRequester }
+            ) { selectedSetting = "Orbit 插件" }
+            Spacer(Modifier.height(8.dp))
+            SettingsMenuItem(
                 "菜单配置",
                 selected = selectedSetting == "菜单配置",
                 modifier = Modifier
@@ -1118,7 +1358,9 @@ internal fun SettingsScreen(
             Modifier.weight(1f).fillMaxHeight()
                 .focusProperties { left = selectedSettingFocusRequester }
         ) {
-            if (selectedSetting == "菜单配置") {
+            if (selectedSetting == "Orbit 插件") {
+                OrbitSettingsPage(orbitRepository, detailEntryFocusRequester, selectedSettingFocusRequester, onOrbitDisabled)
+            } else if (selectedSetting == "菜单配置") {
                 MenuConfigurationPage(
                     settings = menuSettings,
                     entryFocusRequester = detailEntryFocusRequester,
@@ -1338,10 +1580,11 @@ private fun TmdbSettingsPage(
             Spacer(Modifier.height(8.dp))
             Text("绑定期间 TMDB Key 与共享偏好为只读；请在 Cineo Hub 管理页修改。", color = AccentGold, fontSize = 13.sp)
             Spacer(Modifier.height(10.dp))
-            Text(if (configured) "已收到云端 TMDB Key（本机以 Keystore 加密保存，不回显）。" else "云端尚未配置 TMDB Key。", color = ScreenMuted, fontSize = 12.sp)
-            Text("TMDB 语言：${settings.database.readAppSetting("hub.tmdb_language") ?: "zh-CN"} · 包含成人内容：${settings.database.readAppSetting("hub.include_adult") ?: "false"}", color = ScreenMuted, fontSize = 12.sp)
+            Text(if (configured && settings.usesLocalToken()) "云端凭证不可用，当前使用本机保存的 TMDB Token。" else if (configured) "已收到云端 TMDB Key（本机以 Keystore 加密保存，不回显）。" else "云端未配置 TMDB Key，或设置尚未同步成功。", color = ScreenMuted, fontSize = 12.sp)
+            Text("TMDB 语言：${settings.cloudSetting("hub.tmdb_language") ?: "zh-CN"} · 包含成人内容：${settings.cloudSetting("hub.include_adult") ?: "false"}", color = ScreenMuted, fontSize = 12.sp)
         } else {
         Text("访问凭证", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            if (!configured && settings.hasUnscopedLegacyToken()) Text("旧版凭证来源无法区分本地与云端，已保留但暂不使用；请重新输入本地 Token。", color = Color(0xFFFFD99A), fontSize = 12.sp)
             Spacer(Modifier.height(8.dp))
             Text(
                 if (configured) "已配置 · Token 使用 Android Keystore 加密保存，不会回显。输入新 Token 可替换现有配置。"
@@ -1391,12 +1634,14 @@ private fun TmdbSettingsPage(
                 })
                 if (configured) TvActionButton("清除配置", destructive = true, onClick = {
                     if (busy) return@TvActionButton
-                    settings.clearToken()
-                    repository.clearCache()
-                    configured = false
-                    token = ""
-                    error = null
-                    message = "TMDB 配置已清除，详情页将使用资源站信息。"
+                    try {
+                        settings.clearToken()
+                        repository.clearCache()
+                        configured = false
+                        token = ""
+                        error = null
+                        message = "TMDB 配置已清除，详情页将使用资源站信息。"
+                    } catch (_: Exception) { error = "无法清除本地 TMDB 凭证，请重试。" }
                 })
             }
             if (busy) {
@@ -1442,6 +1687,11 @@ private fun TmdbSettingsPage(
     }
 }
 
+internal fun visibleSyncDetail(status: SyncStatus): String? = when (status.label) {
+    "推送部分完成", "推送受阻" -> "部分更改暂未同步，请检查数据后重试。"
+    else -> status.detail
+}
+
 @Composable
 private fun HubSyncPage(
     engine: HubSyncEngine,
@@ -1450,7 +1700,7 @@ private fun HubSyncPage(
 ) {
     val scope = rememberCoroutineScope()
     val credentials = engine.credentials
-    var bound by remember { mutableStateOf(credentials.isBound) }
+    var bound by remember { mutableStateOf(engine.bindingReady()) }
     var hubAddress by remember { mutableStateOf(credentials.hubUrl.orEmpty()) }
     var pin by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -1461,8 +1711,6 @@ private fun HubSyncPage(
     var intervalSeconds by remember { mutableIntStateOf(engine.progressIntervalSeconds()) }
     var lastSync by remember { mutableLongStateOf(credentials.lastSyncAt) }
     var showRemoveDialog by remember { mutableStateOf(false) }
-    var showDiscardDialog by remember { mutableStateOf(false) }
-    var staleCount by remember { mutableIntStateOf(engine.staleOutboxCount()) }
     var removeNotice by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize().padding(end = 8.dp).verticalScroll(rememberScrollState())) {
@@ -1472,6 +1720,11 @@ private fun HubSyncPage(
         Spacer(Modifier.height(22.dp))
 
         if (!bound) {
+            if (credentials.isBound) {
+                Text("设备需要重新关联。请在 Hub 的设备管理中找到此设备，选择“重新关联”生成 PIN。", color = Color(0xFFFFD99A), fontSize = 12.sp)
+                credentials.deviceId?.let { Text("设备 ID：$it", color = ScreenMuted, fontSize = 12.sp) }
+                Spacer(Modifier.height(10.dp))
+            }
             Text("连接 Cineo Hub", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(12.dp))
             InputBox(
@@ -1506,9 +1759,8 @@ private fun HubSyncPage(
                     scope.launch {
                         try {
                             status = engine.bind(hubAddress, pin)
-                            bound = credentials.isBound
+                            bound = engine.bindingReady()
                             lastSync = credentials.lastSyncAt
-                            staleCount = engine.staleOutboxCount()
                             pin = ""
                         } catch (failure: HubApiException) {
                             val api = failure.failure as? HubFailure.Api
@@ -1528,12 +1780,6 @@ private fun HubSyncPage(
             Text("设备 ID：${credentials.deviceId.orEmpty()}", color = ScreenMuted, fontSize = 12.sp)
             Text("最近同步：${if (lastSync > 0L) HubSyncEngine.formatLocalTime(lastSync) else "尚未同步"}", color = ScreenMuted, fontSize = 12.sp)
             credentials.lastFailure?.let { Text("上次状态：$it", color = Color(0xFFFFAA98), fontSize = 12.sp) }
-            if (staleCount > 0) {
-                Spacer(Modifier.height(10.dp))
-                Text("有 $staleCount 条旧待同步更改已隔离，没有上传。请在对应项目重新编辑后再同步，或确认丢弃这些待同步更改。", color = Color(0xFFFFD99A), fontSize = 12.sp)
-                Spacer(Modifier.height(6.dp))
-                TvActionButton("丢弃隔离更改", destructive = true, onClick = { showDiscardDialog = true })
-            }
             Spacer(Modifier.height(14.dp))
             Text("进度推送间隔（仅保存在本机）", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(7.dp))
@@ -1546,7 +1792,7 @@ private fun HubSyncPage(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Text("推送全部时按更新时间解决冲突，以较新的为准。", color = ScreenMuted, fontSize = 12.sp)
+            Text("推送全部时按更新时间处理同步冲突。", color = ScreenMuted, fontSize = 12.sp)
             pushProgress?.takeIf { it.second > 0 }?.let {
                 Text("已处理 ${it.first}/${it.second}", color = AccentGold, fontSize = 12.sp)
             }
@@ -1586,14 +1832,14 @@ private fun HubSyncPage(
                 })
             }
             listOfNotNull(pushStatus, pullStatus, status).forEach { actionStatus ->
-                Text("${actionStatus.label} · ${HubSyncEngine.formatLocalTime(actionStatus.at)}${actionStatus.detail?.let { "：$it" }.orEmpty()}", color = if (actionStatus.label.contains("失败")) Color(0xFFFFAA98) else AccentGold, fontSize = 12.sp)
+                Text("${actionStatus.label} · ${HubSyncEngine.formatLocalTime(actionStatus.at)}${visibleSyncDetail(actionStatus)?.let { "：$it" }.orEmpty()}", color = if (actionStatus.label.contains("失败")) Color(0xFFFFAA98) else AccentGold, fontSize = 12.sp)
             }
         }
 
         status?.let {
             Spacer(Modifier.height(14.dp))
             Text(it.label, color = if (it.label in setOf("已同步", "已绑定")) AccentGold else Color(0xFFFFAA98), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            it.detail?.let { detail -> Text(detail, color = ScreenMuted, fontSize = 12.sp) }
+            visibleSyncDetail(it)?.let { detail -> Text(detail, color = ScreenMuted, fontSize = 12.sp) }
         }
         removeNotice?.let { Text(it, color = AccentGold, fontSize = 12.sp) }
         Spacer(Modifier.height(12.dp))
@@ -1611,36 +1857,22 @@ private fun HubSyncPage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     TvActionButton("取消", onClick = { showRemoveDialog = false })
                     TvActionButton("从本机移除", destructive = true, onClick = {
-                        engine.removeLocalBinding()
-                        bound = false
-                        lastSync = 0L
-                        staleCount = 0
                         showRemoveDialog = false
-                        removeNotice = "已清除本机凭证；请在 Hub 管理页撤销服务端设备。"
+                        busy = true
+                        scope.launch {
+                            try {
+                                engine.removeLocalBinding()
+                                bound = false
+                                lastSync = 0L
+                                removeNotice = "已移除本机绑定；请在 Hub 管理页撤销服务端设备。"
+                            } finally { busy = false }
+                        }
                     })
                 }
             }
         }
     }
-    if (showDiscardDialog) {
-        Dialog(onDismissRequest = { showDiscardDialog = false }) {
-            Column(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF151D28)).padding(22.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("丢弃隔离的旧更改？", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                Text("将移除 $staleCount 条不会自动上传的旧 outbox 记录。已同步到本机的内容不会删除；如要再次同步，请先在对应页面重新编辑。", color = ScreenMuted, fontSize = 13.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    TvActionButton("取消", onClick = { showDiscardDialog = false })
-                    TvActionButton("确认丢弃", destructive = true, onClick = {
-                        engine.discardStaleOutbox()
-                        staleCount = engine.staleOutboxCount()
-                        showDiscardDialog = false
-                    })
-                }
-            }
-        }
-    }
+
 }
 
 private fun hubErrorMessage(failure: HubFailure.Api): String = when (failure.code) {

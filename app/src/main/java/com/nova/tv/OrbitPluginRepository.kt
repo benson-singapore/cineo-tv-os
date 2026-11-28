@@ -82,21 +82,30 @@ internal data class OrbitPageContext(
 internal class OrbitApiException(message: String, val status: Int? = null, val deviceRevoked: Boolean = false) : Exception(message)
 
 /** Device-only Orbit adapter. Orbit is contacted exclusively through the bound Hub. */
-internal class OrbitPluginRepository(private val credentials: DeviceCredentialStore) {
-    fun listPlugins(): List<OrbitPluginConfig> {
+internal class OrbitPluginRepository(private val credentials: DeviceCredentialStore, internal val localSettings: OrbitLocalSettings) {
+    fun refreshPlugins(): List<OrbitPluginConfig> {
+        val binding = localSettings.bindingScope() ?: throw OrbitApiException("请先绑定 Cineo Hub")
         val data = get("/device/orbit-plugins")
         val items = data.optJSONArray("items") ?: throw OrbitApiException("Hub 返回的插件列表结构不受支持")
-        return (0 until items.length()).flatMap { index ->
+        val capabilities = mutableMapOf<String, JSONObject>()
+        val plugins = (0 until items.length()).flatMap { index ->
             val item = items.optJSONObject(index) ?: throw OrbitApiException("Hub 插件配置格式不正确")
             val config = parseOrbitPluginConfig(item)
             if (config.id.isBlank() || config.name.isBlank()) throw OrbitApiException("Hub 插件配置缺少名称或 ID")
-            if (config.channelId.isNotBlank()) listOf(config)
-            else expandOrbitChannels(config, get("/device/orbit-plugins/${pathSegment(config.id)}/capabilities"))
+            val capability = get("/device/orbit-plugins/${pathSegment(config.id)}/capabilities")
+            capabilities[config.id] = capability
+            val expanded = if (config.channelId.isNotBlank()) listOf(config) else expandOrbitChannels(config, capability)
+            expanded.forEach { parseOrbitChannel(capability, it.channelId) }
+            expanded
         }
+        localSettings.saveSnapshot(binding, plugins, capabilities)
+        return plugins
     }
 
+    fun listPlugins(): List<OrbitPluginConfig> = localSettings.plugins()
+
     fun capabilities(config: OrbitPluginConfig): OrbitChannel {
-        val data = get("/device/orbit-plugins/${pathSegment(config.id)}/capabilities")
+        val data = localSettings.capabilities(config.id) ?: throw OrbitApiException("尚未缓存插件能力，请进行云同步")
         return parseOrbitChannel(data, config.channelId)
     }
 

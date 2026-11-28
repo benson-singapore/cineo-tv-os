@@ -91,8 +91,11 @@ private val movies = listOf(
 class MainActivity : ComponentActivity() {
     private val videoRepository by lazy { MacCmsRepository(applicationContext) }
     private val tmdbSettings by lazy { TmdbSettingsStore(applicationContext) }
-    private val hubSyncEngine by lazy { HubSyncEngine(applicationContext, videoRepository, tmdbSettings) }
-    private val orbitRepository by lazy { OrbitPluginRepository(DeviceCredentialStore(applicationContext)) }
+    private val hubSyncEngine by lazy { HubSyncEngine(applicationContext, videoRepository, tmdbSettings, orbitRepository) }
+    private val orbitRepository by lazy {
+        val credentials = DeviceCredentialStore(applicationContext)
+        OrbitPluginRepository(credentials, OrbitLocalSettings(applicationContext, credentials))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -199,6 +202,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
             .mapNotNull { label -> destinations.firstOrNull { it.label == label } }
     }
     var section by remember { mutableStateOf("首页") }
+    var orbitUnlockRevision by remember { mutableIntStateOf(0) }
     val sectionNavigationDestination = remember(section, visibleDestinations) {
         if (section == "配置") null
         else visibleDestinations.firstOrNull { it.section == section } ?: visibleDestinations.firstOrNull()
@@ -375,6 +379,7 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     },
                     onOpenSources = { section = "配置" }
                 )
+                section == "Orbit" && (!orbitRepository.localSettings.enabled || !orbitRepository.localSettings.unlocked().also { orbitUnlockRevision }) -> OrbitAccessGate(orbitRepository.localSettings, sectionContentEntryFocus, sectionNavigationFocus) { orbitUnlockRevision++ }
                 section == "Orbit" -> OrbitPluginScreen(
                     repository = orbitRepository,
                     listActive = remoteDetail == null && playbackEpisode == null && !showExitConfirmation,
@@ -403,6 +408,18 @@ private fun NovaHome(videoRepository: MacCmsRepository, hubSyncEngine: HubSyncEn
                     tmdbSettings = tmdbSettings,
                     tmdbRepository = tmdbRepository,
                     hubSyncEngine = hubSyncEngine,
+                    orbitRepository = orbitRepository,
+                    onOrbitDisabled = { disabledPluginId ->
+                        if (orbitPlayback != null && (disabledPluginId == null || orbitPlayback?.configId == disabledPluginId)) {
+                            playbackEpisode = null
+                            playbackVideo = null
+                            playbackEpisodes = emptyList()
+                            playbackStartPositionMs = 0L
+                            orbitSession = null
+                            orbitNextResolver = null
+                            invalidateOrbitPlayback = null
+                        }
+                    },
                     menuSettings = menuSettings,
                     entryFocusRequester = settingsMenuEntryFocus,
                     menuFocusRequester = sectionNavigationFocus,

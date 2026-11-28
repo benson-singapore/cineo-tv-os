@@ -72,7 +72,7 @@ class WatchSyncEpisodeIndexTest {
         assertEquals(listOf(other, site), safe)
         assertEquals(listOf(old, same), held)
         val unknown = old.copy(key = "broken")
-        assertEquals(listOf(site), partitionWatchOutbox(listOf(unknown, other, site)).first)
+        assertEquals(listOf(other, site), partitionWatchOutbox(listOf(unknown, other, site)).first)
     }
 
     @Test fun incompleteAcknowledgementPreservesBatch() {

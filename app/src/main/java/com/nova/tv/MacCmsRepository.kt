@@ -488,6 +488,13 @@ class MacCmsRepository(context: Context) {
         database.enqueueSyncEnvelope("favorite", key, updatedAt, false, payload.toString())
     }
 
+    private fun isCurrentOutbox(item: SyncEnvelope?): Boolean {
+        if (item == null || database.readSyncState("binding_instance").isBlank()) return false
+        val generation = database.readSyncState("generation", "0").toLongOrNull() ?: return false
+        val baseline = database.readSyncState("baseline_at", "0").toLongOrNull() ?: return false
+        return isUploadableOutboxItem(item, generation, baseline)
+    }
+
     private fun applyRemoteFavorite(envelope: SyncEnvelope, payload: JSONObject, localDeviceId: String, isSnapshot: Boolean) {
         val queued = database.readSyncOutboxItem("favorite", envelope.key)
         if (queued != null && compareSyncState(queued.copy(deviceId = localDeviceId), envelope) > 0) return
@@ -497,7 +504,7 @@ class MacCmsRepository(context: Context) {
         }
         if (envelope.deleted) {
             if (local != null && compareSyncState(local, envelope) > 0) {
-                if (!isSnapshot) enqueueFavoriteSync(existingFavorite!!, local.updatedAt)
+                if (!isSnapshot && isCurrentOutbox(queued)) enqueueFavoriteSync(existingFavorite!!, local.updatedAt)
                 return
             }
             if (existingFavorite != null) database.writableDatabase.delete(FAVORITES_TABLE, "video_id = ?", arrayOf(existingFavorite.id))
@@ -505,7 +512,7 @@ class MacCmsRepository(context: Context) {
         }
         val (video, _) = localVideo(envelope.key, payload) ?: return
         if (local != null && compareSyncState(local, envelope) > 0) {
-            if (!isSnapshot) enqueueFavoriteSync(existingFavorite!!, local.updatedAt)
+            if (!isSnapshot && isCurrentOutbox(queued)) enqueueFavoriteSync(existingFavorite!!, local.updatedAt)
             return
         }
         database.writableDatabase.insertWithOnConflict(FAVORITES_TABLE, null, ContentValues().apply {
@@ -534,7 +541,7 @@ class MacCmsRepository(context: Context) {
         if (envelope.entity == "progress") {
             val localEpisode = database.readEpisodeProgress(envelope.key)
             if (localEpisode != null && compareSyncState(localEpisode.copy(deviceId = localDeviceId), envelope) > 0) {
-                if (!isSnapshot && !localEpisode.deleted) {
+                if (!isSnapshot && isCurrentOutbox(queued) && !localEpisode.deleted) {
                     database.enqueueSyncEnvelope("progress", envelope.key, localEpisode.updatedAt, false,
                         JSONObject(localEpisode.payload ?: emptyMap<String, Any?>()).toString())
                 }
@@ -552,7 +559,7 @@ class MacCmsRepository(context: Context) {
                     SyncEnvelope("history", envelope.key, localRecord.updatedAt, false, null, localDeviceId), envelope
                 ) > 0
             ) {
-                if (!isSnapshot) enqueueWatchSync(localRecord)
+                if (!isSnapshot && isCurrentOutbox(queued)) enqueueWatchSync(localRecord)
                 return
             }
             if (localRecord != null) database.writableDatabase.delete(WATCH_HISTORY_TABLE, "video_id = ?", arrayOf(localRecord.video.id))
@@ -585,7 +592,7 @@ class MacCmsRepository(context: Context) {
         if (envelope.entity == "history" && current != null && currentKey == envelope.key) {
             val local = SyncEnvelope("history", envelope.key, current.updatedAt, false, null, localDeviceId)
             if (compareSyncState(local, envelope) > 0) {
-                if (!isSnapshot) enqueueWatchSync(current)
+                if (!isSnapshot && isCurrentOutbox(queued)) enqueueWatchSync(current)
                 return
             }
         }

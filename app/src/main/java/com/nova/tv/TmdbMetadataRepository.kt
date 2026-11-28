@@ -57,6 +57,7 @@ class TmdbSettingsStore(context: Context) {
     private val preferences = context.applicationContext
         .getSharedPreferences("cineo_tv_tmdb", Context.MODE_PRIVATE)
     internal val database = CineoDatabase(context.applicationContext)
+    private val credentials = DeviceCredentialStore(context.applicationContext)
 
     val cacheRetentionDays: Int
         get() = preferences.getInt(CACHE_RETENTION_DAYS, DEFAULT_CACHE_RETENTION_DAYS)
@@ -69,38 +70,100 @@ class TmdbSettingsStore(context: Context) {
         ).apply()
     }
 
-    fun isConfigured(): Boolean =
-        preferences.contains(TOKEN_CIPHERTEXT) && preferences.contains(TOKEN_IV)
+    /** Cloud credentials are usable only after settings for this exact binding commit. */
+    private fun activeCloudBinding(): String? {
+        if (!credentials.isBound || credentials.revoked) return null
+        val instance = credentials.bindingInstance
+        if (!database.bindingMatches(instance) || database.readSyncState("hub_settings_ready") != instance) return null
+        if (preferences.getString(CLOUD_BINDING, null) != instance) return null
+        if (!credentials.isBound || credentials.revoked || credentials.bindingInstance != instance || !database.bindingMatches(instance)) return null
+        return instance
+    }
 
-    fun saveToken(token: String) {
+    fun isConfigured(): Boolean = readToken() != null
+
+    internal fun hasUnscopedLegacyToken(): Boolean = preferences.contains("token_iv") && preferences.contains("token_ciphertext")
+
+    /** Local tokens are kept separately and never overwritten by Hub synchronization. */
+    fun saveToken(token: String) = synchronized(TmdbAccessGate.lock) { saveEncrypted(token, LOCAL_IV, LOCAL_CIPHERTEXT, null) }
+
+    private fun saveEncrypted(token: String, ivKey: String, cipherKey: String, binding: String?) {
         val normalized = token.trim()
         require(normalized.isNotEmpty()) { "请输入有效的 TMDB API Token" }
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val ciphertext = cipher.doFinal(normalized.toByteArray(Charsets.UTF_8))
-        preferences.edit()
-            .putString(TOKEN_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-            .putString(TOKEN_CIPHERTEXT, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
-            .apply()
+        val edit = preferences.edit().putString(ivKey, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+            .putString(cipherKey, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
+        if (binding != null) edit.putString(CLOUD_BINDING, binding)
+        check(edit.commit()) { "无法保存 TMDB 凭证" }
     }
 
-    fun clearToken() {
-        preferences.edit().remove(TOKEN_IV).remove(TOKEN_CIPHERTEXT).apply()
+    fun clearToken() = synchronized(TmdbAccessGate.lock) {
+        check(preferences.edit().remove(LOCAL_IV).remove(LOCAL_CIPHERTEXT).commit()) { "无法清除本地 TMDB 凭证" }
     }
 
-    internal fun readToken(): String? {
-        val iv = preferences.getString(TOKEN_IV, null) ?: return null
-        val ciphertext = preferences.getString(TOKEN_CIPHERTEXT, null) ?: return null
+    internal fun saveCloudToken(token: String?, binding: String) {
+        if (token.isNullOrBlank()) {
+            check(preferences.edit().remove(CLOUD_IV).remove(CLOUD_CIPHERTEXT).putString(CLOUD_BINDING, binding).commit()) {
+                "无法保存云端 TMDB 设置"
+            }
+        } else saveEncrypted(token, CLOUD_IV, CLOUD_CIPHERTEXT, binding)
+    }
+
+    internal fun applyCloudValues(binding: String, data: JSONObject, writer: (String?, String) -> Unit = ::saveCloudToken) = synchronized(TmdbAccessGate.lock) {
+        check(credentials.isBound && !credentials.revoked && credentials.bindingInstance == binding && database.bindingMatches(binding))
+        database.invalidateHubSettings()
+        val token = if (!data.isNull("tmdb_key")) data.optString("tmdb_key").takeIf(String::isNotBlank) else null
+        writer(token, binding)
+        check(credentials.isBound && !credentials.revoked && credentials.bindingInstance == binding && database.bindingMatches(binding))
+        val prefs = data.optJSONObject("preferences") ?: JSONObject()
+        database.applyHubSettings(binding, mapOf(
+            "hub.tmdb_language" to prefs.optString("tmdb_language", "zh-CN"),
+            "hub.include_adult" to prefs.optBoolean("include_adult", false).toString()
+        ))
+    }
+
+    internal data class TokenLease(val token: String, val scope: String, val language: String, val includeAdult: Boolean, val source: String) {
+        override fun toString(): String = "TokenLease([redacted])"
+    }
+
+    private fun decryptToken(ivKey: String, cipherKey: String): String? {
+        val iv = preferences.getString(ivKey, null) ?: return null
+        val ciphertext = preferences.getString(cipherKey, null) ?: return null
         return runCatching {
             val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(
-                Cipher.DECRYPT_MODE,
-                getOrCreateKey(),
-                GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP))
-            )
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)))
             cipher.doFinal(Base64.decode(ciphertext, Base64.NO_WRAP)).toString(Charsets.UTF_8)
         }.getOrNull()?.takeIf(String::isNotBlank)
     }
+
+    internal fun tokenLease(): TokenLease? = synchronized(TmdbAccessGate.lock) {
+        val cloudBinding = activeCloudBinding()
+        val cloudToken = if (cloudBinding != null) decryptToken(CLOUD_IV, CLOUD_CIPHERTEXT) else null
+        val isCloud = cloudToken != null
+        val token = cloudToken ?: decryptToken(LOCAL_IV, LOCAL_CIPHERTEXT) ?: return@synchronized null
+        val iv = preferences.getString(if (isCloud) CLOUD_IV else LOCAL_IV, null) ?: return@synchronized null
+        val currentBinding = if (credentials.isBound) credentials.bindingInstance else "unbound"
+        val epoch = database.readSyncState("hub_settings_epoch", "none")
+        val revoked = credentials.revoked || database.readSyncState("device_revoked") == "1"
+        val material = "v2:$currentBinding:$epoch:$revoked:${if (isCloud) "cloud" else "local"}:$iv"
+        val scope = java.security.MessageDigest.getInstance("SHA-256").digest(material.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val language = (if (cloudBinding != null) database.readAppSetting("hub.tmdb_language") else null)
+            ?.takeIf { it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) } ?: "zh-CN"
+        val adult = cloudBinding != null && database.readAppSetting("hub.include_adult") == "true"
+        TokenLease(token, scope, language, adult, if (isCloud) "cloud" else "local")
+    }
+
+    internal fun leaseIsCurrent(lease: TokenLease): Boolean = synchronized(TmdbAccessGate.lock) { tokenLease() == lease }
+
+    internal fun cloudSetting(key: String): String? = synchronized(TmdbAccessGate.lock) {
+        if (activeCloudBinding() != null) database.readAppSetting(key) else null
+    }
+
+    internal fun readToken(): String? = tokenLease()?.token
+    internal fun usesLocalToken(): Boolean = tokenLease()?.source == "local"
 
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -120,8 +183,13 @@ class TmdbSettingsStore(context: Context) {
 
     private companion object {
         const val KEY_ALIAS = "cineo_tv_tmdb_token"
-        const val TOKEN_IV = "token_iv"
-        const val TOKEN_CIPHERTEXT = "token_ciphertext"
+        // Legacy unscoped ciphertext is intentionally retained but never read: its
+        // origin (local or a previous Hub account) cannot be established.
+        const val LOCAL_IV = "local_token_iv"
+        const val LOCAL_CIPHERTEXT = "local_token_ciphertext"
+        const val CLOUD_IV = "cloud_token_iv"
+        const val CLOUD_CIPHERTEXT = "cloud_token_ciphertext"
+        const val CLOUD_BINDING = "cloud_binding_instance"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val CACHE_RETENTION_DAYS = "cache_retention_days"
         const val DEFAULT_CACHE_RETENTION_DAYS = 7
@@ -142,25 +210,34 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
         revision.update { it + 1 }
     }
 
-    /** Cache-only lookup: browsing never triggers a TMDB search or season download. */
+    /** Cache-only lookup, scoped to the current credential and settings epoch. */
     suspend fun cachedDetails(video: RemoteVideo): TmdbTvMetadata? = withContext(Dispatchers.IO) {
-        readCachedDetails(video, System.currentTimeMillis())
+        val lease = settings.tokenLease() ?: return@withContext null
+        readCachedDetails(video, System.currentTimeMillis(), lease)
     }
 
-    private fun cacheKey(video: RemoteVideo): String =
-        normalize(video.title).ifBlank { video.title.trim().lowercase() }
+    internal fun cacheKeyForLease(video: RemoteVideo, lease: TmdbSettingsStore.TokenLease): String =
+        "${lease.scope}:${lease.language}:${lease.includeAdult}:" + normalize(video.title).ifBlank { video.title.trim().lowercase() }
 
-    private fun readCachedDetails(video: RemoteVideo, now: Long): TmdbTvMetadata? {
-        val key = cacheKey(video)
-        val (json, lastAccessedAt) = database.readTmdbMetadataCache(key) ?: return null
+    private fun readCachedDetails(video: RemoteVideo, now: Long, lease: TmdbSettingsStore.TokenLease): TmdbTvMetadata? = synchronized(TmdbAccessGate.lock) {
+        if (!settings.leaseIsCurrent(lease)) return@synchronized null
+        val key = cacheKeyForLease(video, lease)
+        val (json, lastAccessedAt) = database.readTmdbMetadataCache(key) ?: return@synchronized null
         if (now - lastAccessedAt >= cacheRetentionMillis()) {
             database.deleteTmdbMetadataCache(key)
-            return null
+            return@synchronized null
         }
         val metadata = runCatching { JSONObject(json).toTmdbTvMetadata() }.getOrNull()
         if (metadata == null) database.deleteTmdbMetadataCache(key)
         else database.touchTmdbMetadataCache(key, now)
-        return metadata
+        metadata
+    }
+
+    internal fun commitCacheForLease(lease: TmdbSettingsStore.TokenLease, key: String, json: String, now: Long): Boolean = synchronized(TmdbAccessGate.lock) {
+        if (!settings.leaseIsCurrent(lease)) return@synchronized false
+        database.writeTmdbMetadataCache(key, json, now)
+        revision.update { it + 1 }
+        true
     }
 
     fun pruneExpiredCache() {
@@ -176,19 +253,20 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
         return withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             val retentionMillis = cacheRetentionMillis()
-            val cacheKey = cacheKey(video)
+            val lease = settings.tokenLease() ?: return@withContext null
+            val cacheKey = cacheKeyForLease(video, lease)
             database.deleteExpiredTmdbMetadataCache(now - retentionMillis)
-            readCachedDetails(video, now)?.let { return@withContext it }
-            val token = settings.readToken() ?: return@withContext null
+            readCachedDetails(video, now, lease)?.let { return@withContext it }
+            val token = lease.token
             val year = video.year.take(4).toIntOrNull()
             val searchTitle = searchTitle(video.title)
             val searchParameters = linkedMapOf(
                 "query" to searchTitle,
-                "language" to configuredLanguage(),
-                "include_adult" to includeAdultContent().toString()
+                "language" to lease.language,
+                "include_adult" to lease.includeAdult.toString()
             )
             if (year != null) searchParameters["first_air_date_year"] = year.toString()
-            var matches = request("search/tv", token, searchParameters).array("results")
+            var matches = request("search/tv", token, searchParameters, lease).array("results")
             fun chooseMatch(candidates: List<JSONObject>): JSONObject? = candidates.mapNotNull { candidate ->
                 val id = candidate.optInt("id", 0)
                 if (id <= 0) null else candidate to matchScore(video, candidate)
@@ -196,7 +274,7 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
                 ?.takeIf { it.second >= MIN_MATCH_SCORE }?.first
             var match = chooseMatch(matches)
             if (match == null && year != null) {
-                matches = request("search/tv", token, mapOf("query" to searchTitle, "language" to configuredLanguage(), "include_adult" to includeAdultContent().toString()))
+                matches = request("search/tv", token, mapOf("query" to searchTitle, "language" to lease.language, "include_adult" to lease.includeAdult.toString()), lease)
                     .array("results")
                 match = chooseMatch(matches)
             }
@@ -206,7 +284,7 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
             val details = request(
                 "tv/$id",
                 token,
-                mapOf("language" to configuredLanguage(), "append_to_response" to "credits,aggregate_credits")
+                mapOf("language" to lease.language, "append_to_response" to "credits,aggregate_credits"), lease
             )
             val seasonNumbers = details.array("seasons")
                 .map { it.optInt("season_number", -1) }
@@ -214,7 +292,7 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
                 .distinct()
             val seasons = coroutineScope {
                 seasonNumbers.map { number -> async {
-                    runCatching { readSeason(id, number, token) }.getOrNull()
+                    runCatching { readSeason(id, number, token, lease) }.getOrNull()
                 } }.awaitAll().filterNotNull()
             }
             val credits = details.optJSONObject("credits") ?: JSONObject()
@@ -257,8 +335,7 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
                 cast = cast,
                 seasons = seasons
             )
-            database.writeTmdbMetadataCache(cacheKey, result.toJson().toString(), now)
-            revision.update { it + 1 }
+            if (!commitCacheForLease(lease, cacheKey, result.toJson().toString(), now)) return@withContext null
             result
         }
     }
@@ -266,13 +343,13 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
     private fun cacheRetentionMillis(): Long =
         settings.cacheRetentionDays * MILLIS_PER_DAY
 
-    private fun configuredLanguage(): String = settings.database.readAppSetting("hub.tmdb_language")
+    private fun configuredLanguage(): String = settings.cloudSetting("hub.tmdb_language")
         ?.takeIf { it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) } ?: "zh-CN"
 
-    private fun includeAdultContent(): Boolean = settings.database.readAppSetting("hub.include_adult") == "true"
+    private fun includeAdultContent(): Boolean = settings.cloudSetting("hub.include_adult") == "true"
 
-    private fun readSeason(tvId: Int, seasonNumber: Int, token: String): TmdbSeasonMetadata {
-        val data = request("tv/$tvId/season/$seasonNumber", token, mapOf("language" to configuredLanguage()))
+    private fun readSeason(tvId: Int, seasonNumber: Int, token: String, lease: TmdbSettingsStore.TokenLease): TmdbSeasonMetadata {
+        val data = request("tv/$tvId/season/$seasonNumber", token, mapOf("language" to lease.language), lease)
         val episodes = data.array("episodes").mapNotNull { episode ->
             val number = episode.optInt("episode_number", 0)
             if (number <= 0) null else TmdbEpisodeMetadata(
@@ -292,7 +369,8 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
         )
     }
 
-    private fun request(path: String, token: String, parameters: Map<String, String>): JSONObject {
+    private fun request(path: String, token: String, parameters: Map<String, String>, lease: TmdbSettingsStore.TokenLease? = null): JSONObject {
+        if (lease != null) check(settings.leaseIsCurrent(lease)) { "TMDB 设置已变更" }
         val builder = android.net.Uri.parse("https://api.themoviedb.org/3/").buildUpon()
         path.split('/').filter(String::isNotBlank).forEach { builder.appendPath(it) }
         parameters.forEach { (key, value) -> builder.appendQueryParameter(key, value) }
@@ -314,7 +392,9 @@ class TmdbMetadataRepository(private val settings: TmdbSettingsStore) {
                 }
                 throw IllegalStateException(reason)
             }
-            connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
+            val result = connection.inputStream.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
+            if (lease != null) check(settings.leaseIsCurrent(lease)) { "TMDB 设置已变更" }
+            result
         } finally {
             connection.disconnect()
         }

@@ -181,14 +181,17 @@ internal fun OrbitPluginScreen(
         loading = true
         scope.launch {
             try {
-                val result = withContext(Dispatchers.IO) { repository.listPlugins() }
+                val all = withContext(Dispatchers.IO) { repository.listPlugins() }
+                val result = all.filter { repository.localSettings.isEnabled(it.id) }
                 if (generation == pluginGeneration) {
                     plugins = result
                     val sameHub = previewPreferences.getString("selected_hub", null) == selectionHub
                     selected = restoreOrbitSelection(result, selected,
                         if (sameHub) previewPreferences.getString("selected_plugin", null) else null,
                         if (sameHub) previewPreferences.getString("selected_channel", null) else null)
-                    if (result.isEmpty()) pluginError = "Hub 目前没有启用的 Orbit 插件"
+                    if (result.isEmpty()) pluginError = if (all.isEmpty())
+                        "尚无已拉取的 Orbit 插件，请先进行云同步"
+                    else "所有 Orbit 插件均已停用，请在设置中启用需要的插件"
                 }
             } catch (failure: Exception) {
                 if (generation == pluginGeneration) pluginError = failure.message ?: "无法读取 Hub 插件配置"

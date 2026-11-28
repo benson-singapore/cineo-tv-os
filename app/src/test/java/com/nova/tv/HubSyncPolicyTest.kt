@@ -48,6 +48,47 @@ class HubSyncPolicyTest {
     }
 
     @Test
+    fun combinedActionRefreshesAfterPartialPushWithoutExposingInternalRecords() = kotlinx.coroutines.runBlocking {
+        val calls = mutableListOf<String>()
+        val actions = HubSyncActions(
+            push = { SyncStatus("已推送") },
+            pull = { calls += "pull:${it.value}"; SyncStatus("已拉取") },
+            pushAll = { SyncStatus("推送部分完成", "未确认旧记录") }
+        )
+        val result = actions.pushThenPull()
+        assertEquals(listOf("pull:manual_pull"), calls)
+        assertEquals("同步部分完成", result.label)
+        assertTrue(result.detail!!.contains("云端数据已更新"))
+        assertFalse(result.detail!!.contains("记录"))
+    }
+
+    @Test
+    fun settingsFailureDoesNotPreventOrbitCacheRefresh() = kotlinx.coroutines.runBlocking {
+        var refreshed = false
+        val errors = refreshCloudComponents(
+            applySettings = { throw IllegalStateException("offline settings") },
+            refreshOrbit = { refreshed = true },
+            verifyBinding = { }
+        )
+        assertTrue(refreshed)
+        assertEquals(listOf("云端设置更新失败"), errors)
+    }
+
+    @Test
+    fun revokedBindingStopsOrbitCacheRefresh() = kotlinx.coroutines.runBlocking {
+        var refreshed = false
+        try {
+            refreshCloudComponents(
+                applySettings = { throw HubApiException(HubFailure.DeviceRevoked) },
+                refreshOrbit = { refreshed = true },
+                verifyBinding = { }
+            )
+            throw AssertionError("revocation must stop refresh")
+        } catch (_: HubApiException) { }
+        assertFalse(refreshed)
+    }
+
+    @Test
     fun combinedActionUsesFullSnapshotPushBeforePull() = kotlinx.coroutines.runBlocking {
         val calls = mutableListOf<String>()
         val actions = HubSyncActions(
@@ -178,7 +219,7 @@ class HubSyncPolicyTest {
         pending.put(progress, SyncTrigger.AUTO_PROGRESS)
         pending.put(favorite, SyncTrigger.AUTO_FAVORITE)
 
-        assertEquals(listOf(progress to SyncTrigger.AUTO_PROGRESS, favorite to SyncTrigger.AUTO_FAVORITE), pending.drain())
+        assertEquals(listOf(PendingSinglePush(progress, SyncTrigger.AUTO_PROGRESS), PendingSinglePush(favorite, SyncTrigger.AUTO_FAVORITE)), pending.drain())
         assertTrue(pending.drain().isEmpty())
     }
 
@@ -189,7 +230,17 @@ class HubSyncPolicyTest {
         val latest = SyncEnvelope("favorite", "k", 11, true, null)
         pending.put(latest, SyncTrigger.AUTO_FAVORITE)
 
-        assertEquals(listOf(latest to SyncTrigger.AUTO_FAVORITE), pending.drain())
+        assertEquals(listOf(PendingSinglePush(latest, SyncTrigger.AUTO_FAVORITE)), pending.drain())
+    }
+
+    @Test
+    fun pendingSameKeyFromDifferentBindingsDoesNotReplaceNewBinding() {
+        val pending = PendingSinglePushes()
+        val old = SyncEnvelope("favorite", "k", 1, false, null)
+        val current = old.copy(updatedAt = 2)
+        pending.put(old, SyncTrigger.AUTO_FAVORITE, "old")
+        pending.put(current, SyncTrigger.AUTO_FAVORITE, "new")
+        assertEquals(listOf("old", "new"), pending.drain().map { it.bindingInstance })
     }
 
     @Test
